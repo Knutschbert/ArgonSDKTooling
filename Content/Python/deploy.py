@@ -159,7 +159,7 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
         _pak.pak_mod(result, *pak_args)
 
 
-def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir):
+def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None):
     """Pak already-cooked output, validating provenance (pak-only mode)."""
     from deploy import provenance
     uproject = _engine.find_project(uproject_path)
@@ -170,7 +170,8 @@ def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir):
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
     provenance.validate_cooked_output(cooked, manifest, name, _cook.source_manifest(uproject, mod_dir))
     _log('cook provenance validated: {0}'.format(manifest))
-    return _pak.pak_mod({'success': True, 'mod': name, 'cooked_dir': cooked}, dest_dir, engine_dir)
+    return _pak.pak_mod({'success': True, 'mod': name, 'cooked_dir': cooked}, dest_dir, engine_dir,
+                        max_pak_size=max_pak_size)
 
 
 # -- CLI -----------------------------------------------------------------------
@@ -188,12 +189,14 @@ def _main(argv=None):
     p.add_argument('--out', help='output dir (default <Saved>/CookedMod/<mod>)')
     p.add_argument('--dest', help='pak destination dir (cook then pak)')
     p.add_argument('--max-chunk', type=int, default=_cook.MAX_PACKAGES_PER_RUN)
+    p.add_argument('--max-pak-size', help='split the pak if it exceeds this size, e.g. 200MB')
     p.add_argument('--dry-run', action='store_true', help='print commands without running')
     p.add_argument('--uproject'); p.add_argument('--engine')
 
     p = sub.add_parser('pak', help='pak already-cooked output (provenance-validated)')
     p.add_argument('mods', nargs='+')
     p.add_argument('--dest', required=True)
+    p.add_argument('--max-pak-size', help='split the pak if it exceeds this size, e.g. 200MB')
     p.add_argument('--uproject'); p.add_argument('--engine')
 
     p = sub.add_parser('sync-tooling', help='update the plugin/widget pack, preserving _Local')
@@ -226,7 +229,7 @@ def _cli_cook(args):
             ok = False
             continue
         if args.dest:
-            _pak.pak_mod(result, args.dest, args.engine)
+            _pak.pak_mod(result, args.dest, args.engine, max_pak_size=args.max_pak_size)
     return 0 if ok else 1
 
 
@@ -260,7 +263,7 @@ def _cli_pak(args):
     ok = True
     for mod in args.mods:
         try:
-            _pak_cooked(mod, None, args.dest, args.uproject, args.engine)
+            _pak_cooked(mod, None, args.dest, args.uproject, args.engine, args.max_pak_size)
         except RuntimeError as error:
             print('deploy: {0}'.format(error), file=sys.stderr)
             ok = False
