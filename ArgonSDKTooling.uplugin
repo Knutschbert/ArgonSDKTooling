@@ -1,0 +1,21 @@
+{
+	"FileVersion": 3,
+	"FriendlyName": "Argon SDK Tooling",
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"Description": "Shared, portable cook/pak + mod-pack tooling for the Chivalry 2 SDK. Widgets are replace-not-merge artifacts; _Local/ holds user customizations and is never overwritten.",
+	"Category": "Modding",
+	"CreatedBy": "Chiv2-Community",
+	"CreatedByURL": "https://github.com/Chiv2-Community",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [],
+	"Plugins": [
+		{ "Name": "PythonScriptPlugin", "Enabled": true }
+	]
+}

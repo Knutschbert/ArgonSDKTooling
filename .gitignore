@@ -1,0 +1,17 @@
+# User customizations — NEVER committed, NEVER overwritten by sync-tooling.
+# Copy a widget here, keep it, and updates will leave it alone.
+Content/Scripts/_Local/
+
+# Python caches / artefacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Per-user local deploy config — machine/owner specific, never committed.
+deploy.local.json
+
+# Editor / build outputs made when the plugin is enabled in a SDK
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
