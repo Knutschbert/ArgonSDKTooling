@@ -39,6 +39,36 @@ def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=_co
     return _pak.cook_and_pak(mod, dest_dir, uproject_path, ue4_root, max_chunk=max_chunk)
 
 
+def cook_many(mods, dest_dir=None, uproject_path=None, ue4_root=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN):
+    """Cook each mod in the list; if dest_dir is given, pak each after a successful cook.
+
+    Returns the per-mod result dicts. Accepts a single mod string or a list/tuple.
+    Blocking (each cook runs to completion in turn).
+    """
+    if not isinstance(mods, (list, tuple)):
+        mods = [mods]
+    results = []
+    for mod in mods:
+        result = _cook.cook_mod(mod, uproject_path, ue4_root, max_chunk=max_chunk)
+        if result['success'] and dest_dir:
+            _pak.pak_mod(result, dest_dir, ue4_root)
+        results.append(result)
+    return results
+
+
+def pak_many(mods, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None):
+    """Pak already-cooked output for each mod (provenance-validated).
+
+    Returns a list of (mod, pak path). Accepts a single mod string or a list/tuple.
+    """
+    if not isinstance(mods, (list, tuple)):
+        mods = [mods]
+    out = []
+    for mod in mods:
+        out.append((mod, _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size)))
+    return out
+
+
 # -- editor entry (async via Slate tick, faithful port of cook_mod) ------------
 
 try:
