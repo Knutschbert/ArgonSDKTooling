@@ -159,8 +159,8 @@ def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_s
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
     provenance.validate_cooked_output(cooked, manifest, name, _cook.source_manifest(uproject, mod_dir))
     _log('cook provenance validated: {0}'.format(manifest))
-    return _pak.pak_mod({'success': True, 'mod': name, 'cooked_dir': cooked}, dest_dir, engine_dir,
-                        max_pak_size=max_pak_size)
+    return _pak.pak_mod({'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked},
+                        dest_dir, engine_dir, max_pak_size=max_pak_size)
 
 
 # -- CLI -----------------------------------------------------------------------

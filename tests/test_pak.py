@@ -64,6 +64,18 @@ class WriteFilelistTests(TempCase):
         self.assertEqual(target, '../../../TBL/Content/Mesh/Weapon.uasset')
         self.assertNotIn('Mods/AgMods', target)
 
+    def test_non_agmods_mount_tracks_the_true_mod_dir(self):
+        # a mod under /Game/Mods/ArgonSDK/Mods/MapSelector must mount there, not under AgMods
+        cooked = self._path('cooked2', 'TBL', 'Content', 'Mods', 'ArgonSDK', 'Mods', 'MapSelector')
+        self._write('cooked2/TBL/Content/Mods/ArgonSDK/Mods/MapSelector/A.uasset')
+        fl = self._path('fl2.txt')
+        mod_dir = '/Game/Mods/ArgonSDK/Mods/MapSelector'
+        pak.write_filelist(cooked, mod_dir, fl)
+        with open(fl) as handle:
+            line = handle.read().strip()
+        self.assertIn('"../../../TBL/Content/Mods/ArgonSDK/Mods/MapSelector/A.uasset"', line)
+        self.assertNotIn('AgMods', line)
+
     def test_mixed(self):
         self._write('cooked/TBL/Content/Mods/AgMods/MyMod/Normal.uasset')
         self._write('cooked/TBL/Content/Mods/AgMods/MyMod/_Content/Game/Override.uasset')

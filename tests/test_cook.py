@@ -126,6 +126,21 @@ class ChunkingTests(TempCase):
                            self._path('out'), self._path('log.log'), [], max_chunk=250, _start=False)
         self.assertTrue(job.cooked_dir.endswith(os.path.join('out', 'TBL', 'Content', 'Mods', 'AgMods', 'M')))
 
+    def test_cooked_dir_uses_true_mod_dir_not_agmods(self):
+        # a mod whose real root is NOT /Game/Mods/AgMods (e.g. inside ArgonSDK)
+        mod_dir = '/Game/Mods/ArgonSDK/Mods/MapSelector'
+        packages = ['/Game/Mods/ArgonSDK/Mods/MapSelector/A',
+                    '/Game/Mods/ArgonSDK/Mods/MapSelector/B']
+        job = cook.CookJob('MapSelector', self._path('u.uproject'), self._path('e'), packages,
+                           self._path('out'), self._path('log.log'), [], max_chunk=250,
+                           mod_dir=mod_dir, _start=False)
+        self.assertTrue(job.cooked_dir.endswith(
+            os.path.join('out', 'TBL', 'Content', 'Mods', 'ArgonSDK', 'Mods', 'MapSelector')))
+        # the result carries the true mod_dir so pak mounts to the real path
+        job.result = {'success': True, 'mod': 'MapSelector', 'mod_dir': mod_dir,
+                      'cooked_dir': job.cooked_dir, 'packages': 2, 'errors': [], 'chunks': 1}
+        self.assertEqual(job.result['mod_dir'], mod_dir)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

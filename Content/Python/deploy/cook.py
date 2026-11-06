@@ -105,13 +105,16 @@ class CookJob(object):
     """A running cook (one or more commandlet runs, chunked). poll() never blocks."""
 
     def __init__(self, mod, uproject, engine_root, packages, out_dir, log_path, source_files,
-                 max_chunk=MAX_PACKAGES_PER_RUN, _start=True):
+                 max_chunk=MAX_PACKAGES_PER_RUN, mod_dir=None, _start=True):
         self.mod, self.uproject, self.engine_root = mod, uproject, engine_root
         self.packages = packages
         self.out_dir, self.log_path = out_dir, log_path
         self.source_files = source_files
+        # The mod's REAL /Game/... root (not assumed AgMods). Locates where the
+        # cook writes output; a bare name falls back to the AgMods default.
+        self.mod_dir = mod_dir or mod_package_dir(self.mod)
         self.cooked_dir = os.path.join(
-            out_dir, PROJECT_NAME, 'Content', mod_package_dir(mod)[len('/Game/'):].replace('/', os.sep))
+            out_dir, PROJECT_NAME, 'Content', self.mod_dir[len('/Game/'):].replace('/', os.sep))
         self.manifest_path = os.path.join(out_dir, 'CookModManifest.json')
         self.chunks = [packages[i:i + max_chunk] for i in range(0, len(packages), max_chunk)]
         self.max_chunk = max_chunk
@@ -136,7 +139,7 @@ class CookJob(object):
         except Exception as error:
             self._close_devnull()
             self.process = None
-            self.result = {'success': False, 'mod': self.mod, 'packages': len(self.packages),
+            self.result = {'success': False, 'mod': self.mod, 'mod_dir': self.mod_dir, 'packages': len(self.packages),
                            'cooked_dir': self.cooked_dir, 'log': log_path,
                            'seconds': round(time.time() - self.began, 1),
                            'errors': ['could not start cook process: {0}'.format(error)],
@@ -172,7 +175,7 @@ class CookJob(object):
         self.errors += errors
         if ok and self._next():
             return None
-        self.result = {'success': ok, 'mod': self.mod, 'packages': len(self.packages),
+        self.result = {'success': ok, 'mod': self.mod, 'mod_dir': self.mod_dir, 'packages': len(self.packages),
                        'cooked_dir': self.cooked_dir, 'log': self._chunk_log,
                        'seconds': round(time.time() - self.began, 1),
                        'errors': self.errors, 'chunks': len(self.chunks)}
@@ -213,7 +216,7 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     if not os.path.isdir(os.path.dirname(log_path)):
         os.makedirs(os.path.dirname(log_path))
     return CookJob(name, uproject, engine_root, packages, out_dir, log_path, source_files,
-                   max_chunk=max_chunk)
+                   max_chunk=max_chunk, mod_dir=mod_dir)
 
 
 def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN):

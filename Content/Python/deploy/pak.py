@@ -131,7 +131,9 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
     engine_root = engine.find_engine(ue4_root)
     if not os.path.isdir(dest_dir):
         os.makedirs(dest_dir)
-    mod_dir = '/Game/Mods/AgMods/' + result['mod']
+    # The mod's REAL /Game/... root (resolved at cook time). Fall back to AgMods
+    # for older result dicts.
+    mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
     entries = _build_entries(result['cooked_dir'], mod_dir)
     if not entries:
         raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
