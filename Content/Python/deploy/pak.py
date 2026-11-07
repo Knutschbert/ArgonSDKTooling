@@ -26,6 +26,40 @@ from deploy import engine, provenance, unrealpak
 
 PROJECT_NAME = 'TBL'
 
+# Step timing for one pak, collected on the worker thread. Timestamps are
+# recorded, and printed ONCE at the end as deltas (avoids per-line print/flush
+# lag on the worker thread skewing the numbers).
+try:
+    _STEPS
+except NameError:  # pragma: no cover - module reload in the editor
+    _STEPS = []
+
+
+
+def _step(label):
+    return _STEPS.append((label, _mono()))
+
+
+def _mono():
+    return time.time()
+
+
+def _dump_steps(mod):
+    """Print one consolidated timing line for the whole pak (labels in order)."""
+    if not _STEPS:
+        return
+    t0 = _STEPS[0][1]
+    deltas = []
+    prev = t0
+    for label, ts in _STEPS:
+        deltas.append((label, ts - prev))
+        prev = ts
+    total = prev - t0
+    parts = ' ; '.join('{0}={1:.2f}s'.format(k, v) for k, v in deltas)
+    print('[deploy-step] pak {0}: total={1:.2f}s {{{2}}}'.format(mod, total, parts))
+    del _STEPS[:]
+
+
 _MULTIPLIERS = {'kb': 1024 ** 1, 'mb': 1024 ** 2, 'gb': 1024 ** 3,
                 'k': 1024 ** 1, 'm': 1024 ** 2, 'g': 1024 ** 3, 'b': 1}
 
@@ -128,13 +162,17 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
     """
     if not result.get('success'):
         raise RuntimeError('The cook of {0} failed: nothing to pak'.format(result.get('mod')))
+    _step('find_engine')
     engine_root = engine.find_engine(ue4_root)
+    _step('makedirs')
     if not os.path.isdir(dest_dir):
         os.makedirs(dest_dir)
     # The mod's REAL /Game/... root (resolved at cook time). Fall back to AgMods
     # for older result dicts.
     mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
+    _step('build_entries')
     entries = _build_entries(result['cooked_dir'], mod_dir)
+    _step('parse_partition')
     if not entries:
         raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
 
@@ -146,6 +184,7 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
         parts = [entries]
     multi = len(parts) > 1
 
+    _step('discover_unrealpak')
     unrealpak_run = unrealpak.discover_unrealpak(engine_root=engine_root)
     token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
     temps, published = [], []
@@ -158,11 +197,16 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
             temp_listing = os.path.join(dest_dir, '.{0}{1}.txt.tmp'.format(token, suffix))
             article = os.path.join(dest_dir, stem + '.pak')
             listing_path = os.path.join(dest_dir, stem + '.txt')
+            _step('write_filelist')
             write_entries(part, filelist)
+            _step('run_create')
             unrealpak.run_create(unrealpak_run, temp_pak, filelist, compress=compress)
+            _step('run_list')
             unrealpak.run_list(unrealpak_run, temp_pak, log_path=temp_listing)
+            _step('publish')
             provenance._replace_file(temp_pak, article)
             provenance._replace_file(temp_listing, listing_path)
+            _step('part_done')
             print('pak part: {0} ({1} files, {2} bytes)'.format(
                 article, len(part), sum(e[2] for e in part)))
             published.append(article)
@@ -178,6 +222,7 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
 
     print('pak: {0} ({1} asset(s), {2} part(s))'.format(
         ', '.join(published), len(entries), len(published)))
+    _dump_steps(result['mod'])
     return published[0] if len(published) == 1 else published
 
 

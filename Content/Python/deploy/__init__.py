@@ -389,14 +389,21 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log):
     """Pak already-cooked output, validating provenance (pak-only mode)."""
     from . import provenance
+    _pak._STEPS[:] = []  # fresh per-mod step timing
+    _pak._step('resolve_project')
     uproject = _engine.find_project(uproject_path)
     mod_dir = _cook.mod_package_dir(mod)
     name = mod_dir.rstrip('/').split('/')[-1]
     cooked_root = os.path.join(os.path.dirname(uproject), 'Saved', 'CookedMod', name)
     cooked = os.path.join(cooked_root, 'TBL', 'Content', mod_dir[len('/Game/'):].replace('/', os.sep))
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
-    provenance.validate_cooked_output(cooked, manifest, name, _cook.source_manifest(uproject, mod_dir))
+    _pak._step('source_manifest')
+    sources = _cook.source_manifest(uproject, mod_dir)
+    _pak._step('validate')
+    provenance.validate_cooked_output(cooked, manifest, name, sources)
+    _pak._step('validated_log')
     log('cook provenance validated: {0}'.format(manifest))
+    _pak._step('pak_mod')
     return _pak.pak_mod({'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked},
                         dest_dir, engine_dir, max_pak_size=max_pak_size)
 
