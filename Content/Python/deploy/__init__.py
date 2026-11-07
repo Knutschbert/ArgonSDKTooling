@@ -83,6 +83,20 @@ except NameError:  # pragma: no cover - module reload in the editor
 
 _RUNNING = _STATE.running  # (job, pak_args or None)
 
+# Overall operation state for widget polling: state in
+# idle / cooking / paking / done, plus success/result/error when done.
+_OP = {'state': 'idle', 'mod': None, 'success': None, 'result': None, 'error': None}
+
+
+def poll():
+    """Overall status for the widget tick: a dict with 'state' in
+    idle/cooking/paking/done and, when done, 'success'/'result'/'error'."""
+    return dict(_OP)
+
+
+def _set(state, mod=None, success=None, result=None, error=None):
+    _OP.update(state=state, mod=mod, success=success, result=result, error=error)
+
 
 def _stop_tick_callback():
     if _RUNNING or _STATE.tick_handle is None or not _engine.in_editor():
@@ -103,6 +117,7 @@ def _start_tick_callback():
 
 
 def _tick(_delta=0.0):
+    # -- cook stage --
     for entry in list(_RUNNING):
         job, pak_args = entry
         try:
@@ -121,15 +136,44 @@ def _tick(_delta=0.0):
             _log('cook {0}: {1}'.format(result.get('mod'), 'OK' if result.get('success') else 'FAILED'),
                  not result.get('success'))
             if not result.get('success'):
-                _log('  see {0}'.format(result.get('log', '')), True)
+                _set('done', result.get('mod'), success=False,
+                     error='; '.join(result.get('errors') or []))
                 for line in (result.get('errors') or [])[:5]:
                     _log('  ' + line[:200], True)
             elif pak_args:
-                _pak.pak_mod(result, *pak_args)
+                # cook done and pak requested -> start the pak asynchronously
+                _start_async_pak(result['mod'], pak_args[0], pak_args[1])
+                return
+            else:
+                _set('done', result.get('mod'), success=True, result=result.get('cooked_dir'))
         except Exception as error:
+            _set('done', job.mod, success=False, error=str(error))
             _log('cook/pak {0} failed after completion: {1}'.format(result.get('mod') or job.mod, error), True)
         finally:
             _stop_tick_callback()
+        return
+    # -- pak stage --
+    _poll_pak_stage()
+
+
+def _start_async_pak(mod, dest_dir, engine_dir, uproject_path=None):
+    """Begin the (non-blocking) pak stage and reflect it in poll()."""
+    _set('paking', mod)
+    _log('pak started: {0} -> {1}'.format(mod, dest_dir))
+    start_pak(mod, dest_dir, uproject_path, engine_dir)
+
+
+def _poll_pak_stage():
+    """Advance the pak stage; mark done when the async pak finishes."""
+    done = pak_poll()
+    if done is None or _OP.get('state') != 'paking':
+        return
+    status, path, error = done
+    if status == 'ok':
+        _set('done', _OP.get('mod'), success=True, result=path)
+    else:
+        _set('done', _OP.get('mod'), success=False, error=error)
+    _stop_tick_callback()
 
 
 def _truthy(value):
@@ -145,22 +189,40 @@ def _log(message, error=False):
 
 
 def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_cook, do_pak):
-    """Widget entry: cook, pak, or cook then pak. Async in the editor, blocking outside."""
+    """Widget entry: cook, pak, or cook then pak. Fully NON-BLOCKING in the editor.
+
+    Results are tracked via poll() (read from the widget's Event Tick and returned
+    through output pins). Outside the editor it blocks, as before.
+    """
     do_cook, do_pak = _truthy(do_cook), _truthy(do_pak)
     mod = mod_dir or mod_name
     if not (do_cook or do_pak):
         _log('Nothing to do: hold Shift to cook, Ctrl to pak, both to cook then pak.')
+        _set('idle', mod)
         return
     if do_pak and not dest_dir:
         _log('No destination folder for the pak (DestDir is empty).', True)
+        _set('done', mod, success=False, error='no destination folder for the pak')
         return
-    if not do_cook:
+
+    in_editor = _engine.in_editor()
+
+    # pak-only -> non-blocking in the editor
+    if not do_cook and do_pak:
+        if in_editor:
+            _start_tick_callback()
+            _start_async_pak(mod, dest_dir, engine_dir, uproject_path)
+            return
+        _set('done', mod, success=False, error=None)
         _pak_cooked(mod, None, dest_dir, uproject_path, engine_dir)
         return
+
     job = _cook.start_cook(mod, uproject_path, engine_dir)
+    _set('cooking', mod)
     _log('cook {0} started: {1} packages (log {2})'.format(job.mod, len(job.packages), job.log_path))
     pak_args = (dest_dir, engine_dir) if do_pak else None
-    if _engine.in_editor():
+
+    if in_editor:
         entry = (job, pak_args)
         _RUNNING.append(entry)
         try:
@@ -171,12 +233,18 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
         except Exception as error:
             _RUNNING.remove(entry)
             job.cancel()
+            _set('done', mod, success=False, error='could not start cook polling: {0}'.format(error))
             _log('could not start cook polling: {0}'.format(error), True)
             return
+
+    # non-editor: block (as before)
     result = job.wait()
     _log('cook {0}: {1}'.format(result['mod'], 'OK' if result['success'] else 'FAILED'), not result['success'])
     if result['success'] and pak_args:
         _pak.pak_mod(result, *pak_args)
+    _set('done', mod, success=result['success'],
+         result=result.get('cooked_dir') if result['success'] else None,
+         error='; '.join(result.get('errors') or []) if not result['success'] else None)
 
 
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log):

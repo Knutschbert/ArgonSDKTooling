@@ -153,5 +153,38 @@ class PakAsyncTests(TempCase):
                 time.sleep(0.02)
 
 
+class OperationStateTests(TempCase):
+    def test_poll_reflects_set(self):
+        deploy._set('cooking', 'M')
+        self.assertEqual(deploy.poll()['state'], 'cooking')
+        self.assertEqual(deploy.poll()['mod'], 'M')
+        deploy._set('idle')
+        self.assertEqual(deploy.poll()['state'], 'idle')
+
+    def test_async_pak_drives_poll_to_done(self):
+        import time
+
+        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            time.sleep(0.15)
+            return 'out/M.pak'
+
+        self._mock(pak_cooked=slow_pak)
+        deploy._start_async_pak('M', 'out', None)
+        self.assertEqual(deploy.poll()['state'], 'paking')
+        deadline = time.time() + 5
+        done = None
+        while time.time() < deadline:
+            done = deploy.pak_poll()
+            if done is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(done)
+        deploy._poll_pak_stage()
+        state = deploy.poll()
+        self.assertEqual(state['state'], 'done')
+        self.assertTrue(state['success'])
+        self.assertEqual(state['result'], 'out/M.pak')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
