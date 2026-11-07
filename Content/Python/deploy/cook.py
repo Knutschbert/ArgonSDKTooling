@@ -200,6 +200,8 @@ class CookJob(object):
 
 def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN):
     """Start cooking one mod folder in a separate UE4Editor-Cmd process. Returns a CookJob."""
+    if max_chunk is None:
+        max_chunk = MAX_PACKAGES_PER_RUN
     uproject = engine.find_project(uproject_path)
     engine_root = engine.find_engine(ue4_root, uproject=uproject)
     mod_dir = mod_package_dir(mod)

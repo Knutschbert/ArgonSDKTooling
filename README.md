@@ -36,6 +36,10 @@ deploy.run_from_widget(mod_name, mod_dir, upr, engine, dest, do_cook, do_pak)  #
 deploy.start_many([...mods...], dest_dir=..., do_cook=..., do_pak=...)          # multi, non-blocking
 deploy.cook_mod(...) / deploy.cook_and_pak(...)                                 # blocking
 
+# cook_many / pak_many also run non-blocking (same poll() UI as a single marker):
+deploy.cook_many([...mods...], dest_dir=..., non_blocking=True)   # cook (+pak if dest) async
+deploy.pak_many([...mods...], dest, non_blocking=True)            # pak already-cooked output async
+
 # widget Event Tick -> read state
 s = deploy.poll()          # state: idle/cooking/paking/done; mod; index/total;
                            # when done: success/result/error

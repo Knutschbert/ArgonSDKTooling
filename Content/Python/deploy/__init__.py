@@ -40,14 +40,26 @@ def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=_co
     return _pak.cook_and_pak(mod, dest_dir, uproject_path, ue4_root, max_chunk=max_chunk)
 
 
-def cook_many(mods, dest_dir=None, uproject_path=None, ue4_root=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN):
+def cook_many(mods, dest_dir=None, uproject_path=None, ue4_root=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN,
+              non_blocking=False):
     """Cook each mod in the list; if dest_dir is given, pak each after a successful cook.
 
-    Returns the per-mod result dicts. Accepts a single mod string or a list/tuple.
-    Blocking (each cook runs to completion in turn).
+    Accepts a single mod string or a list/tuple.
+
+    Blocking (default): each cook runs to completion in turn; returns the per-mod
+    result dicts.
+
+    non_blocking=True: returns immediately and drives the SAME poll() state machine
+    the single-mod widget uses (deploy.poll() reports 'mod'/'index'/'total' while
+    working and lands on state='done' with 'success'). Returns None; read deploy.poll().
+    Only valid in the editor (outside it, non_blocking is ignored and it blocks).
     """
     if not isinstance(mods, (list, tuple)):
         mods = [mods]
+    if non_blocking:
+        return start_many(mods, dest_dir=dest_dir, uproject_path=uproject_path,
+                          engine_dir=ue4_root, do_cook=True, do_pak=bool(dest_dir),
+                          max_chunk=max_chunk)
     results = []
     for mod in mods:
         result = _cook.cook_mod(mod, uproject_path, ue4_root, max_chunk=max_chunk)
@@ -57,13 +69,24 @@ def cook_many(mods, dest_dir=None, uproject_path=None, ue4_root=None, max_chunk=
     return results
 
 
-def pak_many(mods, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None):
+def pak_many(mods, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None, non_blocking=False):
     """Pak already-cooked output for each mod (provenance-validated).
 
-    Returns a list of (mod, pak path). Accepts a single mod string or a list/tuple.
+    Accepts a single mod string or a list/tuple.
+
+    Blocking (default): paks each in turn; returns a list of (mod, pak path).
+
+    non_blocking=True: returns immediately and drives the SAME poll() state machine
+    used by the single-mod widget (deploy.poll(): 'mod'/'index'/'total', then
+    state='done' with 'success'). Returns None; read deploy.poll(). Only non-blocking
+    in the editor (outside it, non_blocking is ignored and it blocks).
     """
     if not isinstance(mods, (list, tuple)):
         mods = [mods]
+    if non_blocking:
+        return start_many(mods, dest_dir=dest_dir, uproject_path=uproject_path,
+                          engine_dir=ue4_root, do_cook=False, do_pak=True,
+                          max_pak_size=max_pak_size)
     out = []
     for mod in mods:
         out.append((mod, _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size)))
@@ -108,7 +131,8 @@ def _set(state, mod=None, success=None, result=None, error=None, index=None, tot
 # Current run: the mods queue (+ how to process each) for multi-mod runs.
 _QUEUE = []
 _CTX = {'mods': [], 'dest': None, 'upr': None, 'eng': None,
-        'do_cook': False, 'do_pak': False, 'all_ok': True, 'total': 0}
+        'do_cook': False, 'do_pak': False, 'all_ok': True, 'total': 0,
+        'max_chunk': None, 'max_pak_size': None}
 
 
 def _stop_tick_callback():
@@ -135,11 +159,11 @@ def _start_next_mod():
     index = _CTX['total'] - len(_QUEUE)
     if _CTX['do_cook']:
         _set('cooking', mod, index=index, total=_CTX['total'])
-        job = _cook.start_cook(mod, _CTX['upr'], _CTX['eng'])
+        job = _cook.start_cook(mod, _CTX['upr'], _CTX['eng'], max_chunk=_CTX['max_chunk'])
         _RUNNING.append((job, _CTX['do_pak']))
     else:
         _set('paking', mod, index=index, total=_CTX['total'])
-        start_pak(mod, _CTX['dest'], _CTX['upr'], _CTX['eng'])
+        start_pak(mod, _CTX['dest'], _CTX['upr'], _CTX['eng'], max_pak_size=_CTX['max_pak_size'])
 
 
 def _finish_op(success, error=None, result=None):
@@ -201,7 +225,7 @@ def _start_async_pak(mod, dest_dir, engine_dir, uproject_path=None):
     """Begin the (non-blocking) pak stage for one mod and reflect it in poll()."""
     _set('paking', mod, index=_CTX['total'] - len(_QUEUE), total=_CTX['total'])
     _log('pak started: {0} -> {1}'.format(mod, dest_dir))
-    start_pak(mod, dest_dir, uproject_path, engine_dir)
+    start_pak(mod, dest_dir, uproject_path, engine_dir, max_pak_size=_CTX['max_pak_size'])
 
 
 def _truthy(value):
@@ -216,7 +240,8 @@ def _log(message, error=False):
         print(message)
 
 
-def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook=True, do_pak=False):
+def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook=True, do_pak=False,
+               max_chunk=None, max_pak_size=None):
     """Cook/pak a LIST of mods, fully NON-BLOCKING in the editor.
 
     Drives the same poll() state machine as single runs: poll() reports the
@@ -226,6 +251,9 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
 
     In the editor this returns immediately and work proceeds on the Slate tick
     (paids run on a worker thread). Outside the editor it blocks.
+
+    max_chunk / max_pak_size thread through to the underlying cook/pak when set
+    (None uses each module's default).
     """
     if not isinstance(mods, (list, tuple)):
         mods = [mods]
@@ -241,7 +269,8 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
         _set('done', None, success=False, error='no destination folder for the pak', index=0, total=len(mods))
         return
     _CTX.update(mods=mods, dest=dest_dir, upr=uproject_path, eng=engine_dir,
-                do_cook=do_cook, do_pak=do_pak, all_ok=True, total=len(mods))
+                do_cook=do_cook, do_pak=do_pak, all_ok=True, total=len(mods),
+                max_chunk=max_chunk, max_pak_size=max_pak_size)
     _QUEUE[:] = list(mods)
     _set('idle', None, index=0, total=_CTX['total'])
     if _engine.in_editor():
@@ -257,7 +286,7 @@ def _blocking_many():
     for idx, mod in enumerate(_CTX['mods']):
         if _CTX['do_cook']:
             _set('cooking', mod, index=idx, total=total)
-            result = _cook.cook_mod(mod, _CTX['upr'], _CTX['eng'])
+            result = _cook.cook_mod(mod, _CTX['upr'], _CTX['eng'], max_chunk=_CTX['max_chunk'])
             if not result['success']:
                 _CTX['all_ok'] = False
                 _OP['error'] = '; '.join(result.get('errors') or [])
@@ -265,14 +294,14 @@ def _blocking_many():
             if _CTX['do_pak']:
                 _set('paking', mod, index=idx, total=total)
                 try:
-                    _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'])
+                    _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'], max_pak_size=_CTX['max_pak_size'])
                 except Exception as error:  # noqa: BLE001
                     _CTX['all_ok'] = False
                     _OP['error'] = str(error)
         else:  # pak-only
             _set('paking', mod, index=idx, total=total)
             try:
-                _OP['result'] = _pak_cooked(mod, None, dest, _CTX['upr'], _CTX['eng'])
+                _OP['result'] = _pak_cooked(mod, None, dest, _CTX['upr'], _CTX['eng'], _CTX['max_pak_size'])
             except Exception as error:  # noqa: BLE001
                 _CTX['all_ok'] = False
                 _OP['error'] = str(error)

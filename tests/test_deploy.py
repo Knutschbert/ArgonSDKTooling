@@ -250,5 +250,143 @@ class OperationStateTests(TempCase):
         self.assertEqual(deploy._PAK_RESULT, [])  # result consumed
         self.assertEqual(deploy._QUEUE, [])       # mod finished and popped
 
+
+class NonBlockingManyTests(TempCase):
+    """cook_many / pak_many with non_blocking=True route through start_many's poll()."""
+
+    def test_cook_many_nonblocking_cooks_and_reaches_done(self):
+        cooked = []
+
+        def fake_cook_mod(mod, up=None, ue=None, max_chunk=250):
+            cooked.append(mod)
+            return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
+                    'errors': [], 'chunks': 1}
+
+        deploy._cook.cook_mod = fake_cook_mod
+        result = deploy.cook_many(['A', 'B'], non_blocking=True)
+        self.assertIsNone(result)  # returns immediately; read poll()
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertTrue(s['success'])
+        self.assertEqual(cooked, ['A', 'B'])
+        self.assertEqual((s['index'], s['total']), (2, 2))
+
+    def test_cook_many_nonblocking_cook_and_pak(self):
+        paks = []
+
+        def fake_cook_mod(mod, up=None, ue=None, max_chunk=250):
+            return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
+                    'errors': [], 'chunks': 1}
+
+        def fake_pak_mod(result, dest, ue=None, max_pak_size=None):
+            paks.append(result['mod'])
+            return dest + '/' + result['mod'] + '.pak'
+
+        deploy._cook.cook_mod = fake_cook_mod
+        deploy._pak.pak_mod = fake_pak_mod
+        deploy.cook_many(['A', 'B'], dest_dir='out', non_blocking=True)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertEqual(paks, ['A', 'B'])
+        self.assertTrue(s['success'])
+
+    def test_pak_many_nonblocking(self):
+        paks = []
+
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            paks.append(mod)
+            return dest + '/' + mod + '.pak'
+
+        deploy._pak_cooked = fake_pak
+        result = deploy.pak_many(['A', 'B'], 'out', non_blocking=True)
+        self.assertIsNone(result)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertEqual(paks, ['A', 'B'])
+        self.assertTrue(s['success'])
+
+    def test_nonblocking_passes_max_size_through(self):
+        seen = {}
+
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            seen['size'] = max_pak_size
+            return dest
+
+        deploy._pak_cooked = fake_pak
+        deploy.pak_many(['A'], 'out', max_pak_size='200MB', non_blocking=True)
+        self.assertEqual(seen['size'], '200MB')
+
+
+class TickLoopTests(TempCase):
+    """Drive the internal Slate-tick state machine on ONE mod, cook then pak, and
+    prove it reaches 'done' and stops (no infinite cook/pak loop)."""
+
+    def setUp(self):
+        super(TickLoopTests, self).setUp()
+        self.addCleanup(self._reset_machine)
+        deploy._QUEUE[:] = []
+        deploy._PAK_RUNNING[:] = []
+        deploy._PAK_RESULT[:] = []
+        deploy._set('idle')
+
+    def _reset_machine(self):
+        deploy._QUEUE[:] = []
+        deploy._PAK_RUNNING[:] = []
+        deploy._PAK_RESULT[:] = []
+        deploy._set('idle')
+
+    def _setup_single_cook_pak(self):
+        deploy._CTX.update(mods=['M'], dest='out', upr=None, eng=None,
+                           do_cook=True, do_pak=True, all_ok=True, total=1,
+                           max_chunk=None, max_pak_size=None)
+        deploy._QUEUE[:] = ['M']
+        deploy._set('idle', None, index=0, total=1)
+
+    def test_reaches_done_no_loop(self):
+        seen_cook = []
+        paked = []
+
+        def fake_start_cook(mod, up=None, ue=None, max_chunk=None):
+            seen_cook.append(mod)
+            return _ThreadCookJob(mod)
+
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None):
+            paked.append(mod)
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, mod + '.pak'), None)]
+
+        saved_cook_start, saved_start_pak = deploy._cook.start_cook, deploy.start_pak
+        deploy._cook.start_cook = fake_start_cook
+        deploy.start_pak = fake_start_pak
+        try:
+            self._setup_single_cook_pak()
+            ticks = 0
+            while deploy.poll()['state'] != 'done' and ticks < 100:
+                deploy._tick()
+                ticks += 1
+            self.assertEqual(deploy.poll()['state'], 'done')
+            self.assertTrue(deploy.poll()['success'])
+            self.assertEqual(seen_cook, ['M'])
+            self.assertEqual(paked, ['M'])
+            self.assertLess(ticks, 100)  # terminates, no infinite loop
+        finally:
+            deploy._cook.start_cook = saved_cook_start
+            deploy.start_pak = saved_start_pak
+
+
+class _ThreadCookJob(object):
+    """poll() returns a finished cook result; behaves like deploy.cook.CookJob."""
+
+    def __init__(self, mod):
+        self.mod = mod
+
+    def poll(self):
+        return {'success': True, 'mod': self.mod, 'cooked_dir': 'cooked/' + self.mod,
+                'errors': [], 'chunks': 1}
+
+    def cancel(self):
+        pass
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
