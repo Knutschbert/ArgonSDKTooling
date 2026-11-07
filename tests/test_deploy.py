@@ -216,6 +216,39 @@ class OperationStateTests(TempCase):
         deploy.start_many([])
         self.assertEqual(deploy.poll()['state'], 'done')
 
+    def test_tick_does_not_start_next_while_pak_running(self):
+        started = []
+
+        def fake_start(mod, up=None, ue=None):
+            started.append(mod)
+            return None
+
+        saved = deploy._cook.start_cook
+        deploy._cook.start_cook = fake_start
+        deploy._PAK_RUNNING[:] = [True]
+        deploy._QUEUE[:] = ['A']
+        deploy._set('paking', 'A')
+        try:
+            deploy._tick()
+        finally:
+            deploy._PAK_RUNNING[:] = []
+            deploy._QUEUE[:] = []
+            deploy._cook.start_cook = saved
+        self.assertEqual(started, [])  # must not start the next cook mid-pak
+        self.assertEqual(deploy.poll()['state'], 'paking')  # still in the pak phase
+
+    def test_tick_finishes_op_when_pak_result_ready(self):
+        deploy._PAK_RUNNING[:] = []
+        deploy._PAK_RESULT[:] = [('ok', 'out/A.pak', None)]
+        deploy._QUEUE[:] = ['A']
+        deploy._set('paking', 'A')
+        try:
+            deploy._tick()
+        finally:
+            deploy._PAK_RESULT[:] = []
+            deploy._QUEUE[:] = []
+        self.assertEqual(deploy._PAK_RESULT, [])  # result consumed
+        self.assertEqual(deploy._QUEUE, [])       # mod finished and popped
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

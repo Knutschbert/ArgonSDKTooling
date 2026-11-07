@@ -178,13 +178,16 @@ def _tick(_delta=0.0):
             return
         _finish_op(success=True, result=result.get('cooked_dir'))
         return
-    # -- a pak is in flight --
+    # -- a pak result just became available (or a pak is still running) --
     done = pak_poll()
     if done is not None and _OP.get('state') == 'paking':
         if done[0] == 'ok':
             _finish_op(success=True, result=done[1])
         else:
             _finish_op(success=False, error=done[2])
+        return
+    # a pak is STILL in flight: do NOT start the next mod while one is being paked.
+    if _PAK_RUNNING:
         return
     # -- nothing running: start the next mod, or finish the whole run --
     if _QUEUE:
@@ -229,6 +232,9 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
     mods = [str(m) for m in mods]
     if not mods:
         _set('done', None, success=True, index=0, total=0)
+        return
+    if _RUNNING or _PAK_RUNNING:
+        _log('deploy run already in progress; ignoring start_many', True)
         return
     if do_pak and not dest_dir:
         _log('No destination folder for the pak (DestDir is empty).', True)
