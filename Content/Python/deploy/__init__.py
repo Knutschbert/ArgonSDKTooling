@@ -338,11 +338,13 @@ def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=Non
 
 
 def pak_poll():
-    """None while a pak is running; else (status, pak_path, error)."""
+    """None while a pak is running; else (status, pak_path, error) - consumed ONCE."""
     if _PAK_RUNNING:
         return None
     if _PAK_RESULT:
-        return _PAK_RESULT[0]
+        result = _PAK_RESULT[0]
+        del _PAK_RESULT[:]  # consumed: next poll returns None until the next start_pak
+        return result
     return None
 
 
