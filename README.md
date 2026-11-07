@@ -51,6 +51,18 @@ s = deploy.poll()          # state: idle/cooking/paking/done; mod; index/total;
                            # when done: success/result/error
 ```
 
+Every cook and pak prints a consolidated `[deploy-step]` timing line (wall time `w` +
+per-thread CPU `c` per phase), so per-phase cost is visible in the Output Log:
+
+```
+[deploy-step] cook Chiv2Turbo: total=w9.35s cpu=0.40s {resolve_project=... ; collect_packages=... ; spawn=... ; cook_chunk_1_judge=... ; manifest=...}
+[deploy-step] pak Chiv2Turbo: total=w3.11s cpu=0.20s {resolve_project=... ; ... ; run_create=... ; run_list=... ; publish=...}
+```
+
+If wall time is much larger than CPU for a phase, that phase was mostly waiting
+(GIL/descheduling) rather than working. Async paking resolves project/engine on the
+game thread before the worker starts, so Unreal API calls stay off the worker thread.
+
 ## CLI (non-editor)
 
 ```bash

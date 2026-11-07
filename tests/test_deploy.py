@@ -152,6 +152,49 @@ class PakAsyncTests(TempCase):
             while time.time() < deadline and deploy.pak_poll() is None:
                 time.sleep(0.02)
 
+    def test_editor_resolves_before_worker(self):
+        """In the editor, project/engine are resolved on the calling thread and the
+        worker receives resolved paths (so it never calls unreal off the game thread)."""
+        import time
+
+        resolved = {}
+
+        def fake_find_project(path):
+            resolved['project'] = 'P:/resolved/TBL.uproject'
+            return resolved['project']
+
+        def fake_find_engine(root, uproject=None):
+            resolved['engine'] = 'P:/resolved/Engine'
+            return resolved['engine']
+
+        def capture_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
+            resolved['worker_uproject'] = up
+            resolved['worker_engine'] = ue
+            return dest + '/' + mod + '.pak'
+
+        saved_in_editor, saved_fp, saved_fe, saved_pak_cooked = (
+            deploy._engine.in_editor, deploy._engine.find_project,
+            deploy._engine.find_engine, deploy._pak_cooked)
+        deploy._engine.in_editor = lambda: True
+        deploy._engine.find_project = fake_find_project
+        deploy._engine.find_engine = fake_find_engine
+        deploy._pak_cooked = capture_pak
+        try:
+            deploy.start_pak('A', 'out')
+            deadline = time.time() + 5
+            while time.time() < deadline and deploy.pak_poll() is None:
+                time.sleep(0.02)
+            self.assertEqual(resolved.get('project'), 'P:/resolved/TBL.uproject')
+            self.assertEqual(resolved.get('engine'), 'P:/resolved/Engine')
+            # worker must receive the RESOLVED values (no None -> no unreal call off-thread)
+            self.assertEqual(resolved.get('worker_uproject'), 'P:/resolved/TBL.uproject')
+            self.assertEqual(resolved.get('worker_engine'), 'P:/resolved/Engine')
+        finally:
+            deploy._engine.in_editor, deploy._engine.find_project = saved_in_editor, saved_fp
+            deploy._engine.find_engine, deploy._pak_cooked = saved_fe, saved_pak_cooked
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = []
+
 
 class OperationStateTests(TempCase):
     def test_poll_reflects_set(self):

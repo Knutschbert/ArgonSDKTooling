@@ -29,29 +29,36 @@ MOD_ROOT_DEFAULT = '/Game/Mods/AgMods/'
 MAX_PACKAGES_PER_RUN = 250
 
 # Step timing for one cook, collected on the orchestrating thread and printed
-# once when the cook finishes (avoids per-line print/flush lag).
+# once when the cook finishes (avoids per-line print/flush lag). Records BOTH
+# wall time and calling-thread CPU time so GIL/descheduling stalls (wall high,
+# cpu low) can be told apart from real work.
 try:
     _STEPS
 except NameError:  # pragma: no cover - module reload in the editor
     _STEPS = []
 
+try:
+    _TCPU = time.thread_time
+except AttributeError:  # Python 2.7 safe fallback
+    _TCPU = time.time
+
 
 def _step(label):
-    return _STEPS.append((label, time.time()))
+    return _STEPS.append([label, time.time(), _TCPU()])
 
 
 def _dump_steps(mod):
     """Print one consolidated timing line for the whole cook (labels in order)."""
     if not _STEPS:
         return
-    t0 = _STEPS[0][1]
-    deltas, prev = [], t0
-    for label, ts in _STEPS:
-        deltas.append((label, ts - prev))
-        prev = ts
-    total = prev - t0
-    parts = ' ; '.join('{0}={1:.2f}s'.format(k, v) for k, v in deltas)
-    print('[deploy-step] cook {0}: total={1:.2f}s {{{2}}}'.format(mod, total, parts))
+    w0, c0 = _STEPS[0][1], _STEPS[0][2]
+    deltas, prev_w, prev_c = [], w0, c0
+    for label, ts, tcpu in _STEPS:
+        deltas.append((label, ts - prev_w, tcpu - prev_c))
+        prev_w, prev_c = ts, tcpu
+    total, tcpuf = prev_w - w0, prev_c - c0
+    parts = ' ; '.join('{0}=w{1:.2f}c{2:.2f}'.format(k, w, c) for k, w, c in deltas)
+    print('[deploy-step] cook {0}: total=w{1:.2f}s cpu={2:.2f}s {{{3}}}'.format(mod, total, tcpuf, parts))
     del _STEPS[:]
 
 

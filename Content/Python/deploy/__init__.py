@@ -392,7 +392,10 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log, validate=True, run_list=False):
     """Pak already-cooked output, validating provenance (pak-only mode).
 
-    validate=True (default) re-validates cook provenance before paking.
+    uproject_path / engine_dir should be RESOLVED values when called from a
+    worker thread (find_project/find_engine short-circuit to return a provided
+    path without touching the Unreal API), so all Unreal calls stay on the game
+    thread. validate=True (default) re-validates cook provenance before paking.
     validate=False skips the source re-walk/validation — used right after a fresh
     cook (the manifest was just written), avoiding a redundant scan.
     run_list=False (default) skips the separate UnrealPak -List pass (writes the
@@ -433,6 +436,8 @@ def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=Non
     UnrealPak work runs on a worker thread (pure file/subprocess - no engine/UI
     calls), so it is safe; logging is routed to print, not unreal.log.
 
+    The project/engine are resolved HERE on the calling (game) thread before the
+    worker starts, so the worker never touches the Unreal API off the game thread.
     validate=True (default) re-validates cook provenance first. Pass validate=False
     when paking right after a just-finished cook (the manifest is already fresh) to
     skip the redundant source re-walk. run_list=False (default) skips the separate
@@ -440,12 +445,22 @@ def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=Non
     """
     if _PAK_RUNNING:
         raise RuntimeError('a pak is already running; wait for pak_poll() before starting another')
+    # In the editor, resolve HERE on the calling (game) thread, then hand the
+    # RESOLVED paths to the worker so its find_project/find_engine short-circuit
+    # and never touch the Unreal API off the game thread. Outside the editor the
+    # worker resolves as before (pure file/registry, no Unreal API).
+    if _engine.in_editor():
+        if uproject_path is None:
+            uproject_path = _engine.find_project(uproject_path)
+        if ue4_root is None:
+            ue4_root = _engine.find_engine(ue4_root, uproject=uproject_path)
     _PAK_RUNNING.append(True)
     del _PAK_RESULT[:]
 
     def _work():
         try:
-            path = _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size, log=print, validate=validate, run_list=run_list)
+            path = _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root,
+                               max_pak_size, log=print, validate=validate, run_list=run_list)
             _PAK_RESULT.append(('ok', path, None))
         except Exception as error:  # noqa: BLE001
             _PAK_RESULT.append(('error', None, str(error)))

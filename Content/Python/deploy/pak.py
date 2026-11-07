@@ -28,16 +28,22 @@ PROJECT_NAME = 'TBL'
 
 # Step timing for one pak, collected on the worker thread. Timestamps are
 # recorded, and printed ONCE at the end as deltas (avoids per-line print/flush
-# lag on the worker thread skewing the numbers).
+# lag on the worker thread skewing the numbers). Each entry records BOTH wall
+# time and the calling thread's CPU time, so we can tell "thread was descheduled
+# / GIL-starved" (wall high, cpu low) apart from "actually busy or blocking".
 try:
     _STEPS
 except NameError:  # pragma: no cover - module reload in the editor
     _STEPS = []
 
+try:
+    _TCPU = time.thread_time
+except AttributeError:  # Python 2.7 safe fallback
+    _TCPU = time.time
 
 
 def _step(label):
-    return _STEPS.append((label, _mono()))
+    return _STEPS.append([label, _mono(), _TCPU()])
 
 
 def _mono():
@@ -48,15 +54,14 @@ def _dump_steps(mod):
     """Print one consolidated timing line for the whole pak (labels in order)."""
     if not _STEPS:
         return
-    t0 = _STEPS[0][1]
-    deltas = []
-    prev = t0
-    for label, ts in _STEPS:
-        deltas.append((label, ts - prev))
-        prev = ts
-    total = prev - t0
-    parts = ' ; '.join('{0}={1:.2f}s'.format(k, v) for k, v in deltas)
-    print('[deploy-step] pak {0}: total={1:.2f}s {{{2}}}'.format(mod, total, parts))
+    w0, c0 = _STEPS[0][1], _STEPS[0][2]
+    deltas, prev_w, prev_c = [], w0, c0
+    for label, ts, tcpu in _STEPS:
+        deltas.append((label, ts - prev_w, tcpu - prev_c))
+        prev_w, prev_c = ts, tcpu
+    total, tcpuf = prev_w - w0, prev_c - c0
+    parts = ' ; '.join('{0}=w{1:.2f}c{2:.2f}'.format(k, w, c) for k, w, c in deltas)
+    print('[deploy-step] pak {0}: total=w{1:.2f}s cpu={2:.2f}s {{{3}}}'.format(mod, total, tcpuf, parts))
     del _STEPS[:]
 
 
@@ -170,6 +175,8 @@ def _partition_entries(entries, max_bytes):
 def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, run_list=True):
     """Create/validate <dest>/<mod>.pak from a successful cook result, optionally split by size.
 
+    ue4_root should be a RESOLVED engine path when called from a worker thread
+    (find_engine returns a provided path without touching the Unreal API).
     run_list=True (default) additionally runs an UnrealPak -List pass to validate
     the pak's contents. run_list=False emits the .txt listing locally from the
     entries (no second UnrealPak subprocess) — faster, still produces the .txt.
