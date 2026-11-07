@@ -159,7 +159,8 @@ def discover_unrealpak(engine_root=None, uproject=None, _config=None, _registry=
 
 def _call_default(command, log_path):
     with open(log_path, 'wb') as log:
-        return subprocess.call(command, stdout=log, stderr=subprocess.STDOUT)
+        return subprocess.call(command, stdout=log, stderr=subprocess.STDOUT,
+                               creationflags=engine.subprocess_flags())
 
 
 def run_create(unrealpak, temp_pak, filelist, compress=True, log_path=None, _call=None):

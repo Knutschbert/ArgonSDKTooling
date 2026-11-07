@@ -135,7 +135,8 @@ class CookJob(object):
         try:
             self.process = subprocess.Popen(
                 cook_command(self.engine_root, self.uproject, self.chunks[self.index], self.out_dir, log_path),
-                stdout=self._devnull, stderr=subprocess.STDOUT)
+                stdout=self._devnull, stderr=subprocess.STDOUT,
+                creationflags=engine.subprocess_flags())
         except Exception as error:
             self._close_devnull()
             self.process = None

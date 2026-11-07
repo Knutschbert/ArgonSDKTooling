@@ -210,6 +210,21 @@ def engine_cmd_path(engine_root, target='Win64', exe='UE4Editor-Cmd.exe'):
     return os.path.join(engine_dir(engine_root), 'Binaries', target, exe)
 
 
+def subprocess_flags():
+    """Windows CREATE_NO_WINDOW (hide the subprocess console window); 0 elsewhere.
+
+    Pass to Popen/call as `creationflags`. Guards so non-Windows (and Python 2)
+    never reference a constant that does not exist there.
+    """
+    if os.name != 'nt':
+        return 0
+    try:
+        import subprocess
+        return getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+    except Exception:  # pragma: no cover
+        return 0x08000000
+
+
 def _normalize_root(value):
     """Return the engine root for a config/env value (which may be a root or Engine dir)."""
     if not value:
