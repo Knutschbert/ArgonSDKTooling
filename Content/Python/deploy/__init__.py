@@ -22,6 +22,7 @@ from __future__ import print_function
 import os
 import sys
 import threading
+import time as _time
 
 from . import engine as _engine  # noqa: E402
 from . import cook as _cook      # noqa: E402
@@ -132,7 +133,8 @@ def _set(state, mod=None, success=None, result=None, error=None, index=None, tot
 _QUEUE = []
 _CTX = {'mods': [], 'dest': None, 'upr': None, 'eng': None,
         'do_cook': False, 'do_pak': False, 'all_ok': True, 'total': 0,
-        'max_chunk': None, 'max_pak_size': None}
+        'max_chunk': None, 'max_pak_size': None,
+        'prof': None}  # profiling: {'start': t0, 'mods': {mod: {...phases}}}
 
 
 def _stop_tick_callback():
@@ -159,10 +161,12 @@ def _start_next_mod():
     index = _CTX['total'] - len(_QUEUE)
     if _CTX['do_cook']:
         _set('cooking', mod, index=index, total=_CTX['total'])
+        _prof_phase(mod, 'cook_start', 'resolving+collecting packages')
         job = _cook.start_cook(mod, _CTX['upr'], _CTX['eng'], max_chunk=_CTX['max_chunk'])
         _RUNNING.append((job, _CTX['do_pak']))
     else:
         _set('paking', mod, index=index, total=_CTX['total'])
+        _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
         start_pak(mod, _CTX['dest'], _CTX['upr'], _CTX['eng'], max_pak_size=_CTX['max_pak_size'])
 
 
@@ -192,6 +196,7 @@ def _tick(_delta=0.0):
         _RUNNING.pop(0)
         _log('cook {0}: {1}'.format(result.get('mod'), 'OK' if result.get('success') else 'FAILED'),
              not result.get('success'))
+        _prof_phase(result.get('mod'), 'cook_end', 'done' if result.get('success') else 'failed')
         if not result.get('success'):
             for line in (result.get('errors') or [])[:5]:
                 _log('  ' + line[:200], True)
@@ -205,6 +210,7 @@ def _tick(_delta=0.0):
     # -- a pak result just became available (or a pak is still running) --
     done = pak_poll()
     if done is not None and _OP.get('state') == 'paking':
+        _prof_phase(_OP['mod'], 'pak_end', 'done' if done[0] == 'ok' else 'failed')
         if done[0] == 'ok':
             _finish_op(success=True, result=done[1])
         else:
@@ -217,6 +223,7 @@ def _tick(_delta=0.0):
     if _QUEUE:
         _start_next_mod()
         return
+    _prof_summary()
     _set('done', None, success=_CTX['all_ok'], index=_CTX['total'], total=_CTX['total'])
     _stop_tick_callback()
 
@@ -224,6 +231,7 @@ def _tick(_delta=0.0):
 def _start_async_pak(mod, dest_dir, engine_dir, uproject_path=None):
     """Begin the (non-blocking) pak stage for one mod and reflect it in poll()."""
     _set('paking', mod, index=_CTX['total'] - len(_QUEUE), total=_CTX['total'])
+    _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
     _log('pak started: {0} -> {1}'.format(mod, dest_dir))
     start_pak(mod, dest_dir, uproject_path, engine_dir, max_pak_size=_CTX['max_pak_size'])
 
@@ -238,6 +246,50 @@ def _log(message, error=False):
         (unreal.log_error if error else unreal.log)('[deploy] ' + message)
     else:
         print(message)
+
+
+# -- profiling -------------------------------------------------------------
+# Live timing of each step of a run, printed to the log as it happens. Times are
+# seconds since the run started (t0) plus the wall-clock duration of the phase.
+
+def _prof_reset():
+    _CTX['prof'] = {'t0': _time.time(), 'mods': {}}
+
+
+def _prof_phase(mod, phase, extra=''):
+    """Stamp one (mod, phase) transition and log elapsed-since-run-start + phase duration."""
+    prof = _CTX['prof']
+    if prof is None:
+        return
+    mods = prof['mods'].setdefault(mod, {})
+    now = _time.time()
+    since = now - prof['t0']
+    last = mods.get('_last')
+    mods['_last'] = now
+    phase_dur = (now - last) if last else 0.0
+    mods[phase] = now
+    mods[phase + '_dur'] = phase_dur
+    _log('profile {0}: {1} at {2:.2f}s (+{3:.2f}s {4})'.format(
+        mod, phase, since, phase_dur, extra).rstrip())
+
+
+def _prof_summary():
+    """Log per-mod totals + overall run time (called at 'done')."""
+    prof = _CTX['prof']
+    if prof is None:
+        return
+    total = _time.time() - prof['t0']
+    lines = []
+    for mod, m in prof['mods'].items():
+        cook = m.get('cook_end', m.get('cook_start'))
+        pak = m.get('pak_end', m.get('pak_start'))
+        segs = []
+        if cook:
+            segs.append('cook {0:.2f}s'.format(m.get('cook_dur', 0.0)))
+        if pak:
+            segs.append('pak {0:.2f}s'.format(m.get('pak_dur', 0.0)))
+        lines.append('{0}=[{1}]'.format(mod, ', '.join(segs) if segs else '-'))
+    _log('profile run done in {0:.2f}s : {1}'.format(total, ' ; '.join(lines)))
 
 
 def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook=True, do_pak=False,
@@ -271,6 +323,9 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
     _CTX.update(mods=mods, dest=dest_dir, upr=uproject_path, eng=engine_dir,
                 do_cook=do_cook, do_pak=do_pak, all_ok=True, total=len(mods),
                 max_chunk=max_chunk, max_pak_size=max_pak_size)
+    _prof_reset()
+    _log('profile run start: {0} mod(s), cook={1}, pak={2}{3}'.format(
+        len(mods), do_cook, do_pak, ', dest=' + (dest_dir or '') if dest_dir else ''))
     _QUEUE[:] = list(mods)
     _set('idle', None, index=0, total=_CTX['total'])
     if _engine.in_editor():
@@ -286,25 +341,32 @@ def _blocking_many():
     for idx, mod in enumerate(_CTX['mods']):
         if _CTX['do_cook']:
             _set('cooking', mod, index=idx, total=total)
+            _prof_phase(mod, 'cook_start', 'resolving+collecting packages')
             result = _cook.cook_mod(mod, _CTX['upr'], _CTX['eng'], max_chunk=_CTX['max_chunk'])
+            _prof_phase(mod, 'cook_end', 'done' if result.get('success') else 'failed')
             if not result['success']:
                 _CTX['all_ok'] = False
                 _OP['error'] = '; '.join(result.get('errors') or [])
                 continue
             if _CTX['do_pak']:
                 _set('paking', mod, index=idx, total=total)
+                _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
                 try:
                     _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'], max_pak_size=_CTX['max_pak_size'])
+                    _prof_phase(mod, 'pak_end', 'done')
                 except Exception as error:  # noqa: BLE001
                     _CTX['all_ok'] = False
                     _OP['error'] = str(error)
         else:  # pak-only
             _set('paking', mod, index=idx, total=total)
+            _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
             try:
                 _OP['result'] = _pak_cooked(mod, None, dest, _CTX['upr'], _CTX['eng'], _CTX['max_pak_size'])
+                _prof_phase(mod, 'pak_end', 'done')
             except Exception as error:  # noqa: BLE001
                 _CTX['all_ok'] = False
                 _OP['error'] = str(error)
+    _prof_summary()
     _set('done', None, success=_CTX['all_ok'], index=total, total=total)
 
 

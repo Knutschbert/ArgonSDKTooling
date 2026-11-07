@@ -373,6 +373,47 @@ class TickLoopTests(TempCase):
             deploy._cook.start_cook = saved_cook_start
             deploy.start_pak = saved_start_pak
 
+    def test_tick_emits_profile_phases(self):
+        """The async tick path emits per-phase profile lines (run start + summary)."""
+        logs = []
+
+        def capture(message, error=False):
+            logs.append(message)
+
+        def fake_start_cook(mod, up=None, ue=None, max_chunk=None):
+            return _ThreadCookJob(mod)
+
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None):
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, mod + '.pak'), None)]
+
+        saved_log, saved_cook_start, saved_start_pak = deploy._log, deploy._cook.start_cook, deploy.start_pak
+        deploy._log = capture
+        deploy._cook.start_cook = fake_start_cook
+        deploy.start_pak = fake_start_pak
+        try:
+            deploy._CTX.update(mods=['M'], dest='out', upr=None, eng=None,
+                               do_cook=True, do_pak=True, all_ok=True, total=1,
+                               max_chunk=None, max_pak_size=None)
+            deploy._QUEUE[:] = ['M']
+            deploy._prof_reset()
+            deploy._set('idle', None, index=0, total=1)
+            ticks = 0
+            while deploy.poll()['state'] != 'done' and ticks < 100:
+                deploy._tick()
+                ticks += 1
+            self.assertEqual(deploy.poll()['state'], 'done')
+            profile_lines = [l for l in logs if l.startswith('profile')]
+            self.assertTrue(any('cook_start' in l for l in profile_lines))
+            self.assertTrue(any('cook_end' in l for l in profile_lines))
+            self.assertTrue(any('pak_start' in l for l in profile_lines))
+            self.assertTrue(any('pak_end' in l for l in profile_lines))
+            self.assertTrue(any('run done in' in l for l in profile_lines))
+        finally:
+            deploy._log = saved_log
+            deploy._cook.start_cook = saved_cook_start
+            deploy.start_pak = saved_start_pak
+
 
 class _ThreadCookJob(object):
     """poll() returns a finished cook result; behaves like deploy.cook.CookJob."""
