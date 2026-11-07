@@ -28,6 +28,32 @@ PROJECT_NAME = 'TBL'
 MOD_ROOT_DEFAULT = '/Game/Mods/AgMods/'
 MAX_PACKAGES_PER_RUN = 250
 
+# Step timing for one cook, collected on the orchestrating thread and printed
+# once when the cook finishes (avoids per-line print/flush lag).
+try:
+    _STEPS
+except NameError:  # pragma: no cover - module reload in the editor
+    _STEPS = []
+
+
+def _step(label):
+    return _STEPS.append((label, time.time()))
+
+
+def _dump_steps(mod):
+    """Print one consolidated timing line for the whole cook (labels in order)."""
+    if not _STEPS:
+        return
+    t0 = _STEPS[0][1]
+    deltas, prev = [], t0
+    for label, ts in _STEPS:
+        deltas.append((label, ts - prev))
+        prev = ts
+    total = prev - t0
+    parts = ' ; '.join('{0}={1:.2f}s'.format(k, v) for k, v in deltas)
+    print('[deploy-step] cook {0}: total={1:.2f}s {{{2}}}'.format(mod, total, parts))
+    del _STEPS[:]
+
 
 # -- paths ---------------------------------------------------------------------
 
@@ -132,6 +158,7 @@ class CookJob(object):
         self._chunk_log = log_path
         self._close_devnull()
         self._devnull = open(os.devnull, 'w')
+        self._chunk_start = time.time()
         try:
             self.process = subprocess.Popen(
                 cook_command(self.engine_root, self.uproject, self.chunks[self.index], self.out_dir, log_path),
@@ -146,6 +173,7 @@ class CookJob(object):
                            'errors': ['could not start cook process: {0}'.format(error)],
                            'chunks': len(self.chunks)}
             return False
+        _step('cook_chunk_{0}_spawn'.format(self.index + 1))
         return True
 
     def _close_devnull(self):
@@ -172,6 +200,7 @@ class CookJob(object):
         if self.process.poll() is None:
             return None
         self._close_devnull()
+        _step('cook_chunk_{0}_judge'.format(self.index))
         ok, errors = judge(self._chunk_log)
         self.errors += errors
         if ok and self._next():
@@ -181,6 +210,7 @@ class CookJob(object):
                        'seconds': round(time.time() - self.began, 1),
                        'errors': self.errors, 'chunks': len(self.chunks)}
         if ok:
+            _step('manifest')
             try:
                 from deploy import provenance
                 provenance.write_manifest(self.manifest_path, self.mod, self.source_files, self.cooked_dir)
@@ -188,6 +218,7 @@ class CookJob(object):
             except Exception as error:
                 self.result['success'] = False
                 self.result['errors'].append('could not write cook provenance: {0}'.format(error))
+        _dump_steps(self.mod)
         return self.result
 
     def wait(self, poll_seconds=0.5):
@@ -202,10 +233,15 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     """Start cooking one mod folder in a separate UE4Editor-Cmd process. Returns a CookJob."""
     if max_chunk is None:
         max_chunk = MAX_PACKAGES_PER_RUN
+    del _STEPS[:]
+    _step('find_project')
     uproject = engine.find_project(uproject_path)
+    _step('find_engine')
     engine_root = engine.find_engine(ue4_root, uproject=uproject)
     mod_dir = mod_package_dir(mod)
+    _step('collect_packages')
     packages = collect_packages(uproject, mod_dir)
+    _step('source_manifest')
     source_files = source_manifest(uproject, mod_dir)
     if not packages:
         raise RuntimeError('No packages below {0}'.format(mod_dir))
@@ -218,6 +254,7 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     log_path = os.path.join(saved, 'Logs', 'CookMod_{0}.log'.format(name))
     if not os.path.isdir(os.path.dirname(log_path)):
         os.makedirs(os.path.dirname(log_path))
+    _step('spawn')
     return CookJob(name, uproject, engine_root, packages, out_dir, log_path, source_files,
                    max_chunk=max_chunk, mod_dir=mod_dir)
 
