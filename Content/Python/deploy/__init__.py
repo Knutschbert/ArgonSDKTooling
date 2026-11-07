@@ -84,18 +84,31 @@ except NameError:  # pragma: no cover - module reload in the editor
 _RUNNING = _STATE.running  # (job, pak_args or None)
 
 # Overall operation state for widget polling: state in
-# idle / cooking / paking / done, plus success/result/error when done.
-_OP = {'state': 'idle', 'mod': None, 'success': None, 'result': None, 'error': None}
+# idle / cooking / paking / done, plus success/result/error when done, plus the
+# current mod and index/total so a multi-mod run can display progress.
+_OP = {'state': 'idle', 'mod': None, 'success': None, 'result': None, 'error': None,
+       'index': 0, 'total': 0}
 
 
 def poll():
     """Overall status for the widget tick: a dict with 'state' in
-    idle/cooking/paking/done and, when done, 'success'/'result'/'error'."""
+    idle/cooking/paking/done, the current 'mod', 'index'/'total', and when done
+    'success'/'result'/'error'."""
     return dict(_OP)
 
 
-def _set(state, mod=None, success=None, result=None, error=None):
+def _set(state, mod=None, success=None, result=None, error=None, index=None, total=None):
     _OP.update(state=state, mod=mod, success=success, result=result, error=error)
+    if index is not None:
+        _OP['index'] = index
+    if total is not None:
+        _OP['total'] = total
+
+
+# Current run: the mods queue (+ how to process each) for multi-mod runs.
+_QUEUE = []
+_CTX = {'mods': [], 'dest': None, 'upr': None, 'eng': None,
+        'do_cook': False, 'do_pak': False, 'all_ok': True, 'total': 0}
 
 
 def _stop_tick_callback():
@@ -116,64 +129,76 @@ def _start_tick_callback():
     _STATE.tick_handle = unreal.register_slate_post_tick_callback(_tick)
 
 
+def _start_next_mod():
+    """Begin the next queued mod (cook, or pak if do_cook is off) and reflect in poll()."""
+    mod = _QUEUE[0]
+    index = _CTX['total'] - len(_QUEUE)
+    if _CTX['do_cook']:
+        _set('cooking', mod, index=index, total=_CTX['total'])
+        job = _cook.start_cook(mod, _CTX['upr'], _CTX['eng'])
+        _RUNNING.append((job, _CTX['do_pak']))
+    else:
+        _set('paking', mod, index=index, total=_CTX['total'])
+        start_pak(mod, _CTX['dest'], _CTX['upr'], _CTX['eng'])
+
+
+def _finish_op(success, error=None, result=None):
+    """Record a completed mod, pop it, and let the next tick continue the queue."""
+    if not success:
+        _CTX['all_ok'] = False
+    if _QUEUE:
+        _QUEUE.pop(0)
+    _OP['result'] = result if success else None
+    _OP['error'] = error
+
+
 def _tick(_delta=0.0):
-    # -- cook stage --
-    for entry in list(_RUNNING):
-        job, pak_args = entry
+    # -- a cook is in flight --
+    if _RUNNING:
+        job, pak_wanted = _RUNNING[0]
         try:
             result = job.poll()
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             job.cancel()
-            result = {'success': False, 'mod': job.mod,
-                      'errors': ['cook polling failed: {0}'.format(error)]}
+            _RUNNING.pop(0)
+            _finish_op(success=False, error='cook polling failed: {0}'.format(error))
+            return
         if result is None:
-            continue
-        try:
-            _RUNNING.remove(entry)
-        except ValueError:
-            continue
-        try:
-            _log('cook {0}: {1}'.format(result.get('mod'), 'OK' if result.get('success') else 'FAILED'),
-                 not result.get('success'))
-            if not result.get('success'):
-                _set('done', result.get('mod'), success=False,
-                     error='; '.join(result.get('errors') or []))
-                for line in (result.get('errors') or [])[:5]:
-                    _log('  ' + line[:200], True)
-            elif pak_args:
-                # cook done and pak requested -> start the pak asynchronously
-                _start_async_pak(result['mod'], pak_args[0], pak_args[1])
-                return
-            else:
-                _set('done', result.get('mod'), success=True, result=result.get('cooked_dir'))
-        except Exception as error:
-            _set('done', job.mod, success=False, error=str(error))
-            _log('cook/pak {0} failed after completion: {1}'.format(result.get('mod') or job.mod, error), True)
-        finally:
-            _stop_tick_callback()
+            return
+        _RUNNING.pop(0)
+        _log('cook {0}: {1}'.format(result.get('mod'), 'OK' if result.get('success') else 'FAILED'),
+             not result.get('success'))
+        if not result.get('success'):
+            for line in (result.get('errors') or [])[:5]:
+                _log('  ' + line[:200], True)
+            _finish_op(success=False, error='; '.join(result.get('errors') or []))
+            return
+        if pak_wanted:
+            _start_async_pak(result['mod'], _CTX['dest'], _CTX['eng'], _CTX['upr'])
+            return
+        _finish_op(success=True, result=result.get('cooked_dir'))
         return
-    # -- pak stage --
-    _poll_pak_stage()
+    # -- a pak is in flight --
+    done = pak_poll()
+    if done is not None and _OP.get('state') == 'paking':
+        if done[0] == 'ok':
+            _finish_op(success=True, result=done[1])
+        else:
+            _finish_op(success=False, error=done[2])
+        return
+    # -- nothing running: start the next mod, or finish the whole run --
+    if _QUEUE:
+        _start_next_mod()
+        return
+    _set('done', None, success=_CTX['all_ok'], index=_CTX['total'], total=_CTX['total'])
+    _stop_tick_callback()
 
 
 def _start_async_pak(mod, dest_dir, engine_dir, uproject_path=None):
-    """Begin the (non-blocking) pak stage and reflect it in poll()."""
-    _set('paking', mod)
+    """Begin the (non-blocking) pak stage for one mod and reflect it in poll()."""
+    _set('paking', mod, index=_CTX['total'] - len(_QUEUE), total=_CTX['total'])
     _log('pak started: {0} -> {1}'.format(mod, dest_dir))
     start_pak(mod, dest_dir, uproject_path, engine_dir)
-
-
-def _poll_pak_stage():
-    """Advance the pak stage; mark done when the async pak finishes."""
-    done = pak_poll()
-    if done is None or _OP.get('state') != 'paking':
-        return
-    status, path, error = done
-    if status == 'ok':
-        _set('done', _OP.get('mod'), success=True, result=path)
-    else:
-        _set('done', _OP.get('mod'), success=False, error=error)
-    _stop_tick_callback()
 
 
 def _truthy(value):
@@ -188,63 +213,80 @@ def _log(message, error=False):
         print(message)
 
 
-def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_cook, do_pak):
-    """Widget entry: cook, pak, or cook then pak. Fully NON-BLOCKING in the editor.
+def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook=True, do_pak=False):
+    """Cook/pak a LIST of mods, fully NON-BLOCKING in the editor.
 
-    Results are tracked via poll() (read from the widget's Event Tick and returned
-    through output pins). Outside the editor it blocks, as before.
+    Drives the same poll() state machine as single runs: poll() reports the
+    current 'mod' and 'index'/'total' while working, and lands on
+    state='done' (with 'success') when all mods are processed. A single mod
+    string is treated as a one-element list.
+
+    In the editor this returns immediately and work proceeds on the Slate tick
+    (paids run on a worker thread). Outside the editor it blocks.
+    """
+    if not isinstance(mods, (list, tuple)):
+        mods = [mods]
+    mods = [str(m) for m in mods]
+    if not mods:
+        _set('done', None, success=True, index=0, total=0)
+        return
+    if do_pak and not dest_dir:
+        _log('No destination folder for the pak (DestDir is empty).', True)
+        _set('done', None, success=False, error='no destination folder for the pak', index=0, total=len(mods))
+        return
+    _CTX.update(mods=mods, dest=dest_dir, upr=uproject_path, eng=engine_dir,
+                do_cook=do_cook, do_pak=do_pak, all_ok=True, total=len(mods))
+    _QUEUE[:] = list(mods)
+    _set('idle', None, index=0, total=_CTX['total'])
+    if _engine.in_editor():
+        _start_tick_callback()
+        return
+    _blocking_many()
+
+
+def _blocking_many():
+    """Non-editor fallback: process the queued mods sequentially, blocking."""
+    dest = _CTX['dest']
+    total = _CTX['total']
+    for idx, mod in enumerate(_CTX['mods']):
+        if _CTX['do_cook']:
+            _set('cooking', mod, index=idx, total=total)
+            result = _cook.cook_mod(mod, _CTX['upr'], _CTX['eng'])
+            if not result['success']:
+                _CTX['all_ok'] = False
+                _OP['error'] = '; '.join(result.get('errors') or [])
+                continue
+            if _CTX['do_pak']:
+                _set('paking', mod, index=idx, total=total)
+                try:
+                    _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'])
+                except Exception as error:  # noqa: BLE001
+                    _CTX['all_ok'] = False
+                    _OP['error'] = str(error)
+        else:  # pak-only
+            _set('paking', mod, index=idx, total=total)
+            try:
+                _OP['result'] = _pak_cooked(mod, None, dest, _CTX['upr'], _CTX['eng'])
+            except Exception as error:  # noqa: BLE001
+                _CTX['all_ok'] = False
+                _OP['error'] = str(error)
+    _set('done', None, success=_CTX['all_ok'], index=total, total=total)
+
+
+def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_cook, do_pak):
+    """Widget entry for ONE mod: cook, pak, or cook then pak, non-blocking.
+
+    Just a convenience around start_many([mod], ...); poll() reports the mod.
     """
     do_cook, do_pak = _truthy(do_cook), _truthy(do_pak)
     mod = mod_dir or mod_name
     if not (do_cook or do_pak):
         _log('Nothing to do: hold Shift to cook, Ctrl to pak, both to cook then pak.')
-        _set('idle', mod)
+        _set('idle')
         return
-    if do_pak and not dest_dir:
-        _log('No destination folder for the pak (DestDir is empty).', True)
-        _set('done', mod, success=False, error='no destination folder for the pak')
-        return
-
-    in_editor = _engine.in_editor()
-
-    # pak-only -> non-blocking in the editor
-    if not do_cook and do_pak:
-        if in_editor:
-            _start_tick_callback()
-            _start_async_pak(mod, dest_dir, engine_dir, uproject_path)
-            return
-        _set('done', mod, success=False, error=None)
-        _pak_cooked(mod, None, dest_dir, uproject_path, engine_dir)
-        return
-
-    job = _cook.start_cook(mod, uproject_path, engine_dir)
-    _set('cooking', mod)
-    _log('cook {0} started: {1} packages (log {2})'.format(job.mod, len(job.packages), job.log_path))
-    pak_args = (dest_dir, engine_dir) if do_pak else None
-
-    if in_editor:
-        entry = (job, pak_args)
-        _RUNNING.append(entry)
-        try:
-            _start_tick_callback()
-            return
-        except AttributeError:
-            _RUNNING.remove(entry)
-        except Exception as error:
-            _RUNNING.remove(entry)
-            job.cancel()
-            _set('done', mod, success=False, error='could not start cook polling: {0}'.format(error))
-            _log('could not start cook polling: {0}'.format(error), True)
-            return
-
-    # non-editor: block (as before)
-    result = job.wait()
-    _log('cook {0}: {1}'.format(result['mod'], 'OK' if result['success'] else 'FAILED'), not result['success'])
-    if result['success'] and pak_args:
-        _pak.pak_mod(result, *pak_args)
-    _set('done', mod, success=result['success'],
-         result=result.get('cooked_dir') if result['success'] else None,
-         error='; '.join(result.get('errors') or []) if not result['success'] else None)
+    start_many([mod], dest_dir=dest_dir if do_pak else None,
+               uproject_path=uproject_path, engine_dir=engine_dir,
+               do_cook=do_cook, do_pak=do_pak)
 
 
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log):

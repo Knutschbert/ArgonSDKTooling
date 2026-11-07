@@ -155,35 +155,66 @@ class PakAsyncTests(TempCase):
 
 class OperationStateTests(TempCase):
     def test_poll_reflects_set(self):
-        deploy._set('cooking', 'M')
-        self.assertEqual(deploy.poll()['state'], 'cooking')
-        self.assertEqual(deploy.poll()['mod'], 'M')
+        deploy._set('cooking', 'M', index=1, total=2)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'cooking')
+        self.assertEqual(s['mod'], 'M')
+        self.assertEqual(s['index'], 1)
+        self.assertEqual(s['total'], 2)
         deploy._set('idle')
         self.assertEqual(deploy.poll()['state'], 'idle')
 
-    def test_async_pak_drives_poll_to_done(self):
-        import time
+    def test_start_many_blocking_cook_reports_mods_and_done(self):
+        cooked = []
 
-        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
-            time.sleep(0.15)
-            return 'out/M.pak'
+        def fake_cook_mod(mod, up=None, ue=None, max_chunk=250):
+            cooked.append(mod)
+            return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
+                    'errors': [], 'chunks': 1}
 
-        self._mock(pak_cooked=slow_pak)
-        deploy._start_async_pak('M', 'out', None)
-        self.assertEqual(deploy.poll()['state'], 'paking')
-        deadline = time.time() + 5
-        done = None
-        while time.time() < deadline:
-            done = deploy.pak_poll()
-            if done is not None:
-                break
-            time.sleep(0.02)
-        self.assertIsNotNone(done)
-        deploy._poll_pak_stage()
-        state = deploy.poll()
-        self.assertEqual(state['state'], 'done')
-        self.assertTrue(state['success'])
-        self.assertEqual(state['result'], 'out/M.pak')
+        deploy._cook.cook_mod = fake_cook_mod
+        deploy.start_many(['A', 'B'])  # cook-only; non-editor blocks
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertTrue(s['success'])
+        self.assertEqual(cooked, ['A', 'B'])
+        self.assertEqual((s['index'], s['total']), (2, 2))
+
+    def test_start_many_cook_and_pak(self):
+        paks = []
+
+        def fake_cook_mod(mod, up=None, ue=None, max_chunk=250):
+            return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
+                    'errors': [], 'chunks': 1}
+
+        def fake_pak_mod(result, dest, ue=None, max_pak_size=None):
+            paks.append(result['mod'])
+            return dest + '/' + result['mod'] + '.pak'
+
+        deploy._cook.cook_mod = fake_cook_mod
+        deploy._pak.pak_mod = fake_pak_mod
+        deploy.start_many(['A', 'B'], dest_dir='out', do_cook=True, do_pak=True)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertEqual(paks, ['A', 'B'])
+        self.assertTrue(s['success'])
+
+    def test_start_many_pak_only(self):
+        paks = []
+
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            paks.append(mod)
+            return dest + '/' + mod + '.pak'
+
+        self._mock(pak_cooked=fake_pak)
+        deploy.start_many(['A', 'B'], dest_dir='out', do_cook=False, do_pak=True)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'done')
+        self.assertEqual(paks, ['A', 'B'])
+
+    def test_start_many_empty(self):
+        deploy.start_many([])
+        self.assertEqual(deploy.poll()['state'], 'done')
 
 
 if __name__ == '__main__':
