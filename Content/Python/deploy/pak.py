@@ -122,6 +122,19 @@ def write_entries(entries, filelist_path):
     return len(entries)
 
 
+def write_listing(entries, listing_path):
+    """Write a man-readable pak listing (target mount paths) WITHOUT spawning UnrealPak.
+
+    Replaces the UnrealPak `-List` pass, which is a whole second subprocess launch
+    just to echo back what -create just wrote. The targets are already known from
+    the entries we built, so we write them directly. Returns the target count.
+    """
+    with open(listing_path, 'w') as listing:
+        for _source, target, _size in entries:
+            listing.write(target + '\n')
+    return len(entries)
+
+
 def write_filelist(cooked_dir, mod_dir, filelist_path):
     """Compatibility path: build entries for a cooked mod folder and write them."""
     return write_entries(_build_entries(cooked_dir, mod_dir), filelist_path)
@@ -154,8 +167,12 @@ def _partition_entries(entries, max_bytes):
 
 # -- orchestration -------------------------------------------------------------
 
-def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
+def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, run_list=True):
     """Create/validate <dest>/<mod>.pak from a successful cook result, optionally split by size.
+
+    run_list=True (default) additionally runs an UnrealPak -List pass to validate
+    the pak's contents. run_list=False emits the .txt listing locally from the
+    entries (no second UnrealPak subprocess) — faster, still produces the .txt.
 
     Returns the pak path (str) when not split, or a list of part pak paths when
     split into multiple parts.
@@ -202,7 +219,10 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
             _step('run_create')
             unrealpak.run_create(unrealpak_run, temp_pak, filelist, compress=compress)
             _step('run_list')
-            unrealpak.run_list(unrealpak_run, temp_pak, log_path=temp_listing)
+            if run_list:
+                unrealpak.run_list(unrealpak_run, temp_pak, log_path=temp_listing)
+            else:
+                write_listing(part, temp_listing)
             _step('publish')
             provenance._replace_file(temp_pak, article)
             provenance._replace_file(temp_listing, listing_path)
@@ -226,8 +246,8 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None):
     return published[0] if len(published) == 1 else published
 
 
-def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=250, max_pak_size=None):
+def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=250, max_pak_size=None, run_list=False):
     """Cook the mod folder, then pak it into dest_dir. Returns (result, pak path(s) or None)."""
     from deploy import cook
     result = cook.cook_mod(mod, uproject_path, ue4_root, max_chunk=max_chunk)
-    return result, (pak_mod(result, dest_dir, ue4_root, max_pak_size=max_pak_size) if result['success'] else None)
+    return result, (pak_mod(result, dest_dir, ue4_root, max_pak_size=max_pak_size, run_list=run_list) if result['success'] else None)

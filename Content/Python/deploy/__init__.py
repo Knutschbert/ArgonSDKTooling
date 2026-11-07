@@ -233,7 +233,9 @@ def _start_async_pak(mod, dest_dir, engine_dir, uproject_path=None):
     _set('paking', mod, index=_CTX['total'] - len(_QUEUE), total=_CTX['total'])
     _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
     _log('pak started: {0} -> {1}'.format(mod, dest_dir))
-    start_pak(mod, dest_dir, uproject_path, engine_dir, max_pak_size=_CTX['max_pak_size'])
+    # We got here right after a successful cook (the manifest is fresh), so skip
+    # re-validating provenance here.
+    start_pak(mod, dest_dir, uproject_path, engine_dir, max_pak_size=_CTX['max_pak_size'], validate=False)
 
 
 def _truthy(value):
@@ -350,9 +352,10 @@ def _blocking_many():
                 continue
             if _CTX['do_pak']:
                 _set('paking', mod, index=idx, total=total)
-                _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
+                _prof_phase(mod, 'pak_start', 'fresh cook')
                 try:
-                    _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'], max_pak_size=_CTX['max_pak_size'])
+                    # fresh cook -> skip redundant -List validation pass
+                    _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'], max_pak_size=_CTX['max_pak_size'], run_list=False)
                     _prof_phase(mod, 'pak_end', 'done')
                 except Exception as error:  # noqa: BLE001
                     _CTX['all_ok'] = False
@@ -386,8 +389,15 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
                do_cook=do_cook, do_pak=do_pak)
 
 
-def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log):
-    """Pak already-cooked output, validating provenance (pak-only mode)."""
+def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log, validate=True, run_list=False):
+    """Pak already-cooked output, validating provenance (pak-only mode).
+
+    validate=True (default) re-validates cook provenance before paking.
+    validate=False skips the source re-walk/validation — used right after a fresh
+    cook (the manifest was just written), avoiding a redundant scan.
+    run_list=False (default) skips the separate UnrealPak -List pass (writes the
+    .txt locally); run_list=True re-runs -List for extra validation.
+    """
     from . import provenance
     _pak._STEPS[:] = []  # fresh per-mod step timing
     _pak._step('resolve_project')
@@ -397,15 +407,17 @@ def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_s
     cooked_root = os.path.join(os.path.dirname(uproject), 'Saved', 'CookedMod', name)
     cooked = os.path.join(cooked_root, 'TBL', 'Content', mod_dir[len('/Game/'):].replace('/', os.sep))
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
-    _pak._step('source_manifest')
-    sources = _cook.source_manifest(uproject, mod_dir)
-    _pak._step('validate')
-    provenance.validate_cooked_output(cooked, manifest, name, sources)
-    _pak._step('validated_log')
-    log('cook provenance validated: {0}'.format(manifest))
+    sources = None
+    if validate:
+        _pak._step('source_manifest')
+        sources = _cook.source_manifest(uproject, mod_dir)
+        _pak._step('validate')
+        provenance.validate_cooked_output(cooked, manifest, name, sources)
+        _pak._step('validated_log')
+        log('cook provenance validated: {0}'.format(manifest))
     _pak._step('pak_mod')
     return _pak.pak_mod({'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked},
-                        dest_dir, engine_dir, max_pak_size=max_pak_size)
+                        dest_dir, engine_dir, max_pak_size=max_pak_size, run_list=run_list)
 
 
 # -- async pak (non-blocking, poll from a widget tick) --------------------------
@@ -414,12 +426,17 @@ _PAK_RUNNING = []
 _PAK_RESULT = []
 
 
-def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None):
+def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None, validate=True, run_list=False):
     """Pak already-cooked output in the background (non-blocking).
 
     Poll with pak_poll() from a widget Event Tick. Returns immediately. The actual
     UnrealPak work runs on a worker thread (pure file/subprocess - no engine/UI
     calls), so it is safe; logging is routed to print, not unreal.log.
+
+    validate=True (default) re-validates cook provenance first. Pass validate=False
+    when paking right after a just-finished cook (the manifest is already fresh) to
+    skip the redundant source re-walk. run_list=False (default) skips the separate
+    UnrealPak -List pass and writes the .txt from the entries locally.
     """
     if _PAK_RUNNING:
         raise RuntimeError('a pak is already running; wait for pak_poll() before starting another')
@@ -428,7 +445,7 @@ def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=Non
 
     def _work():
         try:
-            path = _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size, log=print)
+            path = _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size, log=print, validate=validate, run_list=run_list)
             _PAK_RESULT.append(('ok', path, None))
         except Exception as error:  # noqa: BLE001
             _PAK_RESULT.append(('error', None, str(error)))

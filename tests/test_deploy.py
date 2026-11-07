@@ -95,7 +95,7 @@ class PakAsyncTests(TempCase):
     def test_nonblocking_then_poll_resolves(self):
         import time
 
-        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             time.sleep(0.15)
             return os.path.join(dest, mod + '.pak')
 
@@ -117,7 +117,7 @@ class PakAsyncTests(TempCase):
     def test_error_is_captured(self):
         import time
 
-        def fail_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def fail_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             raise RuntimeError('no manifest')
 
         self._mock(pak_cooked=fail_pak)
@@ -137,7 +137,7 @@ class PakAsyncTests(TempCase):
     def test_second_start_while_running_raises(self):
         import time
 
-        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             time.sleep(0.3)
             return 'x.pak'
 
@@ -187,7 +187,7 @@ class OperationStateTests(TempCase):
             return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
                     'errors': [], 'chunks': 1}
 
-        def fake_pak_mod(result, dest, ue=None, max_pak_size=None):
+        def fake_pak_mod(result, dest, ue=None, max_pak_size=None, run_list=False):
             paks.append(result['mod'])
             return dest + '/' + result['mod'] + '.pak'
 
@@ -202,7 +202,7 @@ class OperationStateTests(TempCase):
     def test_start_many_pak_only(self):
         paks = []
 
-        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             paks.append(mod)
             return dest + '/' + mod + '.pak'
 
@@ -278,7 +278,7 @@ class NonBlockingManyTests(TempCase):
             return {'success': True, 'mod': mod, 'cooked_dir': 'cooked/' + mod,
                     'errors': [], 'chunks': 1}
 
-        def fake_pak_mod(result, dest, ue=None, max_pak_size=None):
+        def fake_pak_mod(result, dest, ue=None, max_pak_size=None, run_list=False):
             paks.append(result['mod'])
             return dest + '/' + result['mod'] + '.pak'
 
@@ -293,7 +293,7 @@ class NonBlockingManyTests(TempCase):
     def test_pak_many_nonblocking(self):
         paks = []
 
-        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             paks.append(mod)
             return dest + '/' + mod + '.pak'
 
@@ -308,7 +308,7 @@ class NonBlockingManyTests(TempCase):
     def test_nonblocking_passes_max_size_through(self):
         seen = {}
 
-        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+        def fake_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
             seen['size'] = max_pak_size
             return dest
 
@@ -350,7 +350,7 @@ class TickLoopTests(TempCase):
             seen_cook.append(mod)
             return _ThreadCookJob(mod)
 
-        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None):
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None, validate=True, **kw):
             paked.append(mod)
             deploy._PAK_RUNNING[:] = []
             deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, mod + '.pak'), None)]
@@ -383,7 +383,7 @@ class TickLoopTests(TempCase):
         def fake_start_cook(mod, up=None, ue=None, max_chunk=None):
             return _ThreadCookJob(mod)
 
-        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None):
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None, validate=True, **kw):
             deploy._PAK_RUNNING[:] = []
             deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, mod + '.pak'), None)]
 

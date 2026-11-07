@@ -40,6 +40,12 @@ deploy.cook_mod(...) / deploy.cook_and_pak(...)                                 
 deploy.cook_many([...mods...], dest_dir=..., non_blocking=True)   # cook (+pak if dest) async
 deploy.pak_many([...mods...], dest, non_blocking=True)            # pak already-cooked output async
 
+# After a fresh cook, paking skips the redundant source re-validation and the
+# separate UnrealPak -List pass (the .txt is written locally instead). Keep those
+# for pure pak-only runs, which still fully validate provenance by default.
+deploy.pak_mod(result, dest, run_list=False)   # fast: no second UnrealPak spawn
+deploy.pak_mod(result, dest, run_list=True)    # also run UnrealPak -List to validate contents
+
 # widget Event Tick -> read state
 s = deploy.poll()          # state: idle/cooking/paking/done; mod; index/total;
                            # when done: success/result/error
