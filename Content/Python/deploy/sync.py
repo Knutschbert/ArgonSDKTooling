@@ -102,7 +102,8 @@ def _git_update(dest, log=print):
     for cmd, check in ((['git', '-C', dest, 'fetch', '--all', '--prune'], True),
                        (['git', '-C', dest, 'checkout', branch], True),
                        (['git', '-C', dest, 'reset', '--hard', 'origin/' + branch], True)):
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                creationflags=engine.subprocess_flags())
         out, _ = proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError('sync-tooling failed: {0}\n{1}'.format(' '.join(cmd), out.decode('utf-8', 'replace')))
@@ -127,7 +128,8 @@ def run(args, match=None):
         return 0
     if src and src.startswith(('git@', 'http://', 'https://', 'ssh://')):
         with tempfile.TemporaryDirectory() as scratch:
-            subprocess.check_call(['git', 'clone', '--depth', '1', src, os.path.join(scratch, 'tooling')])
+            subprocess.check_call(['git', 'clone', '--depth', '1', src, os.path.join(scratch, 'tooling')],
+                                  creationflags=engine.subprocess_flags())
             sync_from_dir(os.path.join(scratch, 'tooling'), dest, log=log)
         return 0
     if os.path.isdir(os.path.join(dest, '.git')):

@@ -99,7 +99,7 @@ def _set(state, mod=None, success=None, result=None, error=None):
 
 
 def _stop_tick_callback():
-    if _RUNNING or _STATE.tick_handle is None or not _engine.in_editor():
+    if _RUNNING or _PAK_RUNNING or _STATE.tick_handle is None or not _engine.in_editor():
         return
     try:
         import unreal
