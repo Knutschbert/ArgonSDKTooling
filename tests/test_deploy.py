@@ -91,5 +91,67 @@ class PakManyTests(TempCase):
         self.assertEqual(out[0][1], os.path.join('dest', 'A.pak'))
 
 
+class PakAsyncTests(TempCase):
+    def test_nonblocking_then_poll_resolves(self):
+        import time
+
+        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            time.sleep(0.15)
+            return os.path.join(dest, mod + '.pak')
+
+        self._mock(pak_cooked=slow_pak)
+        deploy.start_pak('A', 'out')
+        # immediately after start it should be running (None)
+        self.assertIsNone(deploy.pak_poll())
+        deadline = time.time() + 5
+        result = None
+        while time.time() < deadline:
+            result = deploy.pak_poll()
+            if result is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'ok')
+        self.assertEqual(result[1], os.path.join('out', 'A.pak'))
+
+    def test_error_is_captured(self):
+        import time
+
+        def fail_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            raise RuntimeError('no manifest')
+
+        self._mock(pak_cooked=fail_pak)
+        deploy.start_pak('A', 'out')
+        deadline = time.time() + 5
+        result = None
+        while time.time() < deadline:
+            result = deploy.pak_poll()
+            if result is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 'error')
+        self.assertIsNone(result[1])
+        self.assertIn('no manifest', result[2])
+
+    def test_second_start_while_running_raises(self):
+        import time
+
+        def slow_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print):
+            time.sleep(0.3)
+            return 'x.pak'
+
+        self._mock(pak_cooked=slow_pak)
+        deploy.start_pak('A', 'out')
+        try:
+            with self.assertRaises(RuntimeError):
+                deploy.start_pak('B', 'out')
+        finally:
+            # let the worker finish so it doesn't leak into later tests
+            deadline = time.time() + 5
+            while time.time() < deadline and deploy.pak_poll() is None:
+                time.sleep(0.02)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

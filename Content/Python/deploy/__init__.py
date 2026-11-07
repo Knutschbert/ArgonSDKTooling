@@ -21,6 +21,7 @@ from __future__ import print_function
 
 import os
 import sys
+import threading
 
 from . import engine as _engine  # noqa: E402
 from . import cook as _cook      # noqa: E402
@@ -178,7 +179,7 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
         _pak.pak_mod(result, *pak_args)
 
 
-def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None):
+def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log):
     """Pak already-cooked output, validating provenance (pak-only mode)."""
     from . import provenance
     uproject = _engine.find_project(uproject_path)
@@ -188,9 +189,51 @@ def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_s
     cooked = os.path.join(cooked_root, 'TBL', 'Content', mod_dir[len('/Game/'):].replace('/', os.sep))
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
     provenance.validate_cooked_output(cooked, manifest, name, _cook.source_manifest(uproject, mod_dir))
-    _log('cook provenance validated: {0}'.format(manifest))
+    log('cook provenance validated: {0}'.format(manifest))
     return _pak.pak_mod({'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked},
                         dest_dir, engine_dir, max_pak_size=max_pak_size)
+
+
+# -- async pak (non-blocking, poll from a widget tick) --------------------------
+
+_PAK_RUNNING = []
+_PAK_RESULT = []
+
+
+def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None):
+    """Pak already-cooked output in the background (non-blocking).
+
+    Poll with pak_poll() from a widget Event Tick. Returns immediately. The actual
+    UnrealPak work runs on a worker thread (pure file/subprocess - no engine/UI
+    calls), so it is safe; logging is routed to print, not unreal.log.
+    """
+    if _PAK_RUNNING:
+        raise RuntimeError('a pak is already running; wait for pak_poll() before starting another')
+    _PAK_RUNNING.append(True)
+    del _PAK_RESULT[:]
+
+    def _work():
+        try:
+            path = _pak_cooked(mod, None, dest_dir, uproject_path, ue4_root, max_pak_size, log=print)
+            _PAK_RESULT.append(('ok', path, None))
+        except Exception as error:  # noqa: BLE001
+            _PAK_RESULT.append(('error', None, str(error)))
+        finally:
+            _PAK_RUNNING[:] = []
+
+    thread = threading.Thread(target=_work)
+    thread.daemon = True
+    thread.start()
+    return None
+
+
+def pak_poll():
+    """None while a pak is running; else (status, pak_path, error)."""
+    if _PAK_RUNNING:
+        return None
+    if _PAK_RESULT:
+        return _PAK_RESULT[0]
+    return None
 
 
 # -- CLI -----------------------------------------------------------------------
