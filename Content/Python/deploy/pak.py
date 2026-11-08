@@ -19,6 +19,7 @@ output is within the threshold, an ordinary single <mod>.pak is produced.
 from __future__ import print_function
 
 import os
+import shutil
 import time
 from collections import OrderedDict
 
@@ -136,24 +137,25 @@ def _runtime_registry_path(cooked_dir, mod_dir):
     return os.path.abspath(os.path.join(os.path.dirname(content_dir), 'AssetRegistry.bin'))
 
 
-def _mod_asset_registry_entry(cooked_dir, mod_dir):
-    """Build the non-colliding ModAssetRegistry.bin pak entry, if present.
+def _stage_mod_asset_registry(cooked_dir, mod_dir):
+    """Stage the runtime registry under its final pak basename, if present.
 
     The cooked runtime registry lives at ``<cook-output>/TBL/AssetRegistry.bin``.
-    Mount it inside the mod namespace rather than at the project-root
-    ``Content/AssetRegistry.bin`` path: the latter would shadow the game's
-    registry when the mod pak has higher priority.
+    UnrealPak's response-file target handling varies between builds, so do not
+    rely on it to rename this file. Copy it into the cooked mod folder with its
+    final name; normal filelist handling then supplies both the desired path and
+    basename. The caller removes the temporary staged copy after paking.
     """
     source = _runtime_registry_path(cooked_dir, mod_dir)
     if not os.path.isfile(source):
         return None
-    target = '../../../{0}/Content/{1}/ModAssetRegistry.bin'.format(
-        PROJECT_NAME, mod_dir[len('/Game/'):].strip('/'))
-    try:
-        size = os.path.getsize(source)
-    except OSError:
-        size = 0
-    return source, target, size
+    staged = os.path.join(cooked_dir, 'ModAssetRegistry.bin')
+    if os.path.exists(staged):
+        raise RuntimeError('refusing to overwrite reserved staged registry path: {0}'.format(staged))
+    if not os.path.isdir(cooked_dir):
+        os.makedirs(cooked_dir)
+    shutil.copyfile(source, staged)
+    return staged
 
 
 def write_entries(entries, filelist_path):
@@ -218,7 +220,7 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     run_list=True (default) additionally runs an UnrealPak -List pass to validate
     the pak's contents. run_list=False emits the .txt listing locally from the
     entries (no second UnrealPak subprocess) — faster, still produces the .txt.
-    include_mod_asset_registry=True adds the cooked runtime registry as
+    include_mod_asset_registry=True stages the cooked runtime registry as
     ``<mod content path>/ModAssetRegistry.bin`` when it exists.
 
     Returns the pak path (str) when not split, or a list of part pak paths when
@@ -234,15 +236,16 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     # The mod's REAL /Game/... root (resolved at cook time). Fall back to AgMods
     # for older result dicts.
     mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
+    staged_registry = None
+    if include_mod_asset_registry:
+        _step('stage_asset_registry')
+        staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
     _step('build_entries')
     entries = _build_entries(result['cooked_dir'], mod_dir)
-    if include_mod_asset_registry:
-        registry_entry = _mod_asset_registry_entry(result['cooked_dir'], mod_dir)
-        if registry_entry is not None:
-            entries.append(registry_entry)
-            entries.sort(key=lambda entry: entry[1])
     _step('parse_partition')
     if not entries:
+        if staged_registry and os.path.exists(staged_registry):
+            os.remove(staged_registry)
         raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
 
     total_size = sum(e[2] for e in entries)
@@ -289,6 +292,12 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
             try:
                 if os.path.exists(path):
                     os.remove(path)
+            except OSError:
+                pass
+        if staged_registry:
+            try:
+                if os.path.exists(staged_registry):
+                    os.remove(staged_registry)
             except OSError:
                 pass
 

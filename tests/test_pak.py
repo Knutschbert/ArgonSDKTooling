@@ -87,27 +87,19 @@ class WriteFilelistTests(TempCase):
         self.assertIn('"../../../TBL/Content/Mods/AgMods/MyMod/Normal.uasset"', joined)
         self.assertIn('"../../../TBL/Content/Game/Override.uasset"', joined)
 
-    def test_mod_asset_registry_mounts_inside_mod_namespace(self):
+    def test_mod_asset_registry_is_staged_under_final_basename(self):
         registry = os.path.abspath(os.path.join(
             self.cooked, '..', '..', '..', '..', 'AssetRegistry.bin'))
         os.makedirs(os.path.dirname(registry), exist_ok=True)
         with open(registry, 'wb') as handle:
             handle.write(b'asset-registry')
-        entry = pak._mod_asset_registry_entry(self.cooked, self.mod_dir)
-        self.assertIsNotNone(entry)
-        entries = pak._build_entries(self.cooked, self.mod_dir)
-        entries.append(entry)
-        registry_entries = [entry for entry in entries if entry[1].endswith('ModAssetRegistry.bin')]
-        self.assertEqual(len(registry_entries), 1)
-        source, target, size = registry_entries[0]
-        self.assertEqual(source, registry)
-        self.assertEqual(
-            target,
-            '../../../TBL/Content/Mods/AgMods/MyMod/ModAssetRegistry.bin')
-        self.assertEqual(size, len(b'asset-registry'))
+        staged = pak._stage_mod_asset_registry(self.cooked, self.mod_dir)
+        self.assertEqual(staged, os.path.join(self.cooked, 'ModAssetRegistry.bin'))
+        with open(staged, 'rb') as handle:
+            self.assertEqual(handle.read(), b'asset-registry')
 
     def test_missing_runtime_registry_is_optional(self):
-        self.assertIsNone(pak._mod_asset_registry_entry(self.cooked, self.mod_dir))
+        self.assertIsNone(pak._stage_mod_asset_registry(self.cooked, self.mod_dir))
 
     def test_root_registry_is_not_packaged_under_original_name(self):
         source = self._path('cooked', 'AssetRegistry.bin')
@@ -166,7 +158,11 @@ class PakModTests(TempCase):
         self.assertIn(
             '"../../../TBL/Content/Mods/AgMods/MyMod/ModAssetRegistry.bin"',
             self.filelist)
+        self.assertIn(
+            '"{0}"'.format(os.path.join(self.cooked, 'ModAssetRegistry.bin')),
+            self.filelist)
         self.assertNotIn('"../../../TBL/Content/AssetRegistry.bin"', self.filelist)
+        self.assertFalse(os.path.exists(os.path.join(self.cooked, 'ModAssetRegistry.bin')))
         # temp files cleaned
         leftovers = [n for n in os.listdir(self.dest) if n.startswith('.')]
         self.assertEqual(leftovers, [])
