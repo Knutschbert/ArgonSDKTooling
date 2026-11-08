@@ -11,7 +11,7 @@ engine from the .uproject's EngineAssociation, the same way Unreal does:
 
 EngineAssociation resolution (mirrors Unreal's FDesktopPlatform):
   * plain Launcher name (SDK1: '4.25'):
-        HKLM/HKCU SOFTWARE\\EpicGames\\Unreal Engine\\Builds  (value = engine root)
+        HKLM/HKCU SOFTWARE\\Epic Games\\Unreal Engine\\Builds  (value = engine root)
         then %ProgramData%\\Epic\\UnrealEngine\\<name>\\Builds.txt
   * source-build GUID (SDK2: '{66C5D560-...}'):
         %APPDATA%\\UnrealEngine\\Install.ini  [InstalledBuilds]  <GUID>=<engine root>
@@ -82,7 +82,7 @@ def _win_registry():
     return None
 
 
-_BUILDS_KEY = r'SOFTWARE\EpicGames\Unreal Engine\Builds'
+_BUILDS_KEY = r'SOFTWARE\Epic Games\Unreal Engine\Builds'
 
 
 def _registry_engine(association, registry=None):
