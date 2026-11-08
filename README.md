@@ -45,6 +45,8 @@ deploy.pak_many([...mods...], dest, non_blocking=True)            # pak already-
 # for pure pak-only runs, which still fully validate provenance by default.
 deploy.pak_mod(result, dest, run_list=False)   # fast: no second UnrealPak spawn
 deploy.pak_mod(result, dest, run_list=True)    # also run UnrealPak -List to validate contents
+# When the cook emitted TBL/AssetRegistry.bin, pak_mod also includes it as
+# TBL/Content/<mod-path>/ModAssetRegistry.bin (never project-root Content/AssetRegistry.bin).
 
 # widget Event Tick -> read state
 s = deploy.poll()          # state: idle/cooking/paking/done; mod; index/total;

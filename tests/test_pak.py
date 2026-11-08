@@ -87,13 +87,35 @@ class WriteFilelistTests(TempCase):
         self.assertIn('"../../../TBL/Content/Mods/AgMods/MyMod/Normal.uasset"', joined)
         self.assertIn('"../../../TBL/Content/Game/Override.uasset"', joined)
 
+    def test_mod_asset_registry_mounts_inside_mod_namespace(self):
+        registry = os.path.abspath(os.path.join(
+            self.cooked, '..', '..', '..', '..', 'AssetRegistry.bin'))
+        os.makedirs(os.path.dirname(registry), exist_ok=True)
+        with open(registry, 'wb') as handle:
+            handle.write(b'asset-registry')
+        entry = pak._mod_asset_registry_entry(self.cooked, self.mod_dir)
+        self.assertIsNotNone(entry)
+        entries = pak._build_entries(self.cooked, self.mod_dir)
+        entries.append(entry)
+        registry_entries = [entry for entry in entries if entry[1].endswith('ModAssetRegistry.bin')]
+        self.assertEqual(len(registry_entries), 1)
+        source, target, size = registry_entries[0]
+        self.assertEqual(source, registry)
+        self.assertEqual(
+            target,
+            '../../../TBL/Content/Mods/AgMods/MyMod/ModAssetRegistry.bin')
+        self.assertEqual(size, len(b'asset-registry'))
+
+    def test_missing_runtime_registry_is_optional(self):
+        self.assertIsNone(pak._mod_asset_registry_entry(self.cooked, self.mod_dir))
+
 
 class PakModTests(TempCase):
     def setUp(self):
         super(PakModTests, self).setUp()
         self.dest = self._path('paks')
         os.makedirs(self.dest)
-        self.cooked = self._path('cooked')
+        self.cooked = self._path('cooked', 'TBL', 'Content', 'Mods', 'AgMods', 'MyMod')
         self._write('cooked/TBL/Content/Mods/AgMods/MyMod/A.uasset')
         self._write('cooked/TBL/Content/Mods/AgMods/MyMod/_Content/B.uasset')
         self.engine_root = self._path('engine')
@@ -106,9 +128,10 @@ class PakModTests(TempCase):
 
     def test_publish_ok(self):
         unrealpak.discover_unrealpak = lambda *a, **k: self._path('engine', 'UnrealPak.exe')
-
         def fake_create(unrealpak_run, temp_pak, filelist, compress=True, log_path=None, _call=None):
             os.makedirs(os.path.dirname(temp_pak), exist_ok=True)
+            with open(filelist) as handle:
+                self.filelist = handle.read()
             with open(temp_pak, 'w') as handle:
                 handle.write('pak')
 
@@ -121,11 +144,20 @@ class PakModTests(TempCase):
         unrealpak.run_create = fake_create
         unrealpak.run_list = fake_list
 
+        registry = os.path.abspath(os.path.join(
+            self.cooked, '..', '..', '..', '..', 'AssetRegistry.bin'))
+        os.makedirs(os.path.dirname(registry), exist_ok=True)
+        with open(registry, 'w') as handle:
+            handle.write('asset-registry')
         result = {'success': True, 'mod': 'MyMod', 'cooked_dir': self.cooked}
         path = pak.pak_mod(result, self.dest, ue4_root=self.engine_root)
         self.assertEqual(path, os.path.join(self.dest, 'MyMod.pak'))
         self.assertTrue(os.path.isfile(path))
         self.assertTrue(os.path.isfile(os.path.join(self.dest, 'MyMod.txt')))
+        self.assertIn(
+            '"../../../TBL/Content/Mods/AgMods/MyMod/ModAssetRegistry.bin"',
+            self.filelist)
+        self.assertNotIn('"../../../TBL/Content/AssetRegistry.bin"', self.filelist)
         # temp files cleaned
         leftovers = [n for n in os.listdir(self.dest) if n.startswith('.')]
         self.assertEqual(leftovers, [])

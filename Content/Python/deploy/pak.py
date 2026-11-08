@@ -119,6 +119,37 @@ def _build_entries(cooked_dir, mod_dir):
     return entries
 
 
+def _runtime_registry_path(cooked_dir, mod_dir):
+    """Return the cooked runtime AssetRegistry.bin beside the cooked TBL root."""
+    content_dir = os.path.dirname(os.path.normpath(cooked_dir))
+    while os.path.basename(content_dir).lower() != 'content':
+        parent = os.path.dirname(content_dir)
+        if parent == content_dir:
+            return os.path.abspath(os.path.join(cooked_dir, 'AssetRegistry.bin'))
+        content_dir = parent
+    return os.path.abspath(os.path.join(os.path.dirname(content_dir), 'AssetRegistry.bin'))
+
+
+def _mod_asset_registry_entry(cooked_dir, mod_dir):
+    """Build the non-colliding ModAssetRegistry.bin pak entry, if present.
+
+    The cooked runtime registry lives at ``<cook-output>/TBL/AssetRegistry.bin``.
+    Mount it inside the mod namespace rather than at the project-root
+    ``Content/AssetRegistry.bin`` path: the latter would shadow the game's
+    registry when the mod pak has higher priority.
+    """
+    source = _runtime_registry_path(cooked_dir, mod_dir)
+    if not os.path.isfile(source):
+        return None
+    target = '../../../{0}/Content/{1}/ModAssetRegistry.bin'.format(
+        PROJECT_NAME, mod_dir[len('/Game/'):].strip('/'))
+    try:
+        size = os.path.getsize(source)
+    except OSError:
+        size = 0
+    return source, target, size
+
+
 def write_entries(entries, filelist_path):
     """Write UnrealPak response entries. Returns the file count."""
     with open(filelist_path, 'w') as filelist:
@@ -172,7 +203,8 @@ def _partition_entries(entries, max_bytes):
 
 # -- orchestration -------------------------------------------------------------
 
-def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, run_list=True):
+def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, run_list=True,
+            include_mod_asset_registry=True):
     """Create/validate <dest>/<mod>.pak from a successful cook result, optionally split by size.
 
     ue4_root should be a RESOLVED engine path when called from a worker thread
@@ -180,6 +212,8 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     run_list=True (default) additionally runs an UnrealPak -List pass to validate
     the pak's contents. run_list=False emits the .txt listing locally from the
     entries (no second UnrealPak subprocess) — faster, still produces the .txt.
+    include_mod_asset_registry=True adds the cooked runtime registry as
+    ``<mod content path>/ModAssetRegistry.bin`` when it exists.
 
     Returns the pak path (str) when not split, or a list of part pak paths when
     split into multiple parts.
@@ -196,6 +230,11 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
     _step('build_entries')
     entries = _build_entries(result['cooked_dir'], mod_dir)
+    if include_mod_asset_registry:
+        registry_entry = _mod_asset_registry_entry(result['cooked_dir'], mod_dir)
+        if registry_entry is not None:
+            entries.append(registry_entry)
+            entries.sort(key=lambda entry: entry[1])
     _step('parse_partition')
     if not entries:
         raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
