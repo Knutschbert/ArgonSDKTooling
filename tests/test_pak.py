@@ -171,6 +171,23 @@ class PakModTests(TempCase):
         with self.assertRaises(RuntimeError):
             pak.pak_mod({'success': False, 'mod': 'MyMod'}, self.dest)
 
+    def test_unrealpak_discovery_failure_unstages_registry(self):
+        # Regression: staging previously happened OUTSIDE the cleanup finally,
+        # so a discovery failure left ModAssetRegistry.bin in the cooked tree
+        # and every later pak refused with 'refusing to overwrite reserved
+        # staged registry path'.
+        unrealpak.discover_unrealpak = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError('UnrealPak.exe not found'))
+        registry = os.path.abspath(os.path.join(
+            self.cooked, '..', '..', '..', '..', 'AssetRegistry.bin'))
+        os.makedirs(os.path.dirname(registry), exist_ok=True)
+        with open(registry, 'w') as handle:
+            handle.write('asset-registry')
+        result = {'success': True, 'mod': 'MyMod', 'cooked_dir': self.cooked}
+        with self.assertRaises(RuntimeError):
+            pak.pak_mod(result, self.dest, ue4_root=self.engine_root)
+        self.assertFalse(os.path.exists(os.path.join(self.cooked, 'ModAssetRegistry.bin')))
+
 
 class ParseSizeTests(unittest.TestCase):
     def test_bare_bytes(self):

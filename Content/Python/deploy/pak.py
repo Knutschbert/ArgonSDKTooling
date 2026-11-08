@@ -236,31 +236,32 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     # The mod's REAL /Game/... root (resolved at cook time). Fall back to AgMods
     # for older result dicts.
     mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
-    staged_registry = None
-    if include_mod_asset_registry:
-        _step('stage_asset_registry')
-        staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
-    _step('build_entries')
-    entries = _build_entries(result['cooked_dir'], mod_dir)
-    _step('parse_partition')
-    if not entries:
-        if staged_registry and os.path.exists(staged_registry):
-            os.remove(staged_registry)
-        raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
-
-    total_size = sum(e[2] for e in entries)
-    threshold = parse_size(max_pak_size) if max_pak_size else None
-    if threshold is not None and total_size > threshold:
-        parts = _partition_entries(entries, threshold)
-    else:
-        parts = [entries]
-    multi = len(parts) > 1
-
-    _step('discover_unrealpak')
-    unrealpak_run = unrealpak.discover_unrealpak(engine_root=engine_root)
-    token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
+    # Everything after engine/dest setup sits inside try/finally below so ANY
+    # failure (bad max-pak-size string, no cooked files, UnrealPak discovery,
+    # create/list validation) still un-stages the temporary registry copy.
     temps, published = [], []
+    staged_registry = None
     try:
+        if include_mod_asset_registry:
+            _step('stage_asset_registry')
+            staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
+        _step('build_entries')
+        entries = _build_entries(result['cooked_dir'], mod_dir)
+        _step('parse_partition')
+        if not entries:
+            raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
+
+        total_size = sum(e[2] for e in entries)
+        threshold = parse_size(max_pak_size) if max_pak_size else None
+        if threshold is not None and total_size > threshold:
+            parts = _partition_entries(entries, threshold)
+        else:
+            parts = [entries]
+        multi = len(parts) > 1
+
+        _step('discover_unrealpak')
+        unrealpak_run = unrealpak.discover_unrealpak(engine_root=engine_root)
+        token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
         for idx, part in enumerate(parts, start=1):
             stem = '{0}_part{1}'.format(result['mod'], idx) if multi else result['mod']
             suffix = '_' + str(idx)
