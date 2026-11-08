@@ -109,6 +109,15 @@ class WriteFilelistTests(TempCase):
     def test_missing_runtime_registry_is_optional(self):
         self.assertIsNone(pak._mod_asset_registry_entry(self.cooked, self.mod_dir))
 
+    def test_root_registry_is_not_packaged_under_original_name(self):
+        source = self._path('cooked', 'AssetRegistry.bin')
+        os.makedirs(os.path.dirname(source), exist_ok=True)
+        with open(source, 'wb') as handle:
+            handle.write(b'asset-registry')
+        entries = pak._build_entries(self._path('cooked'), self.mod_dir)
+        targets = [entry[1] for entry in entries]
+        self.assertNotIn('AssetRegistry.bin', targets)
+
 
 class PakModTests(TempCase):
     def setUp(self):

@@ -104,6 +104,12 @@ def _build_entries(cooked_dir, mod_dir):
         rel = os.path.relpath(root, cooked_dir).replace(os.sep, '/')
         rel = '' if rel == '.' else rel
         for name in files:
+            # The runtime registry is emitted beside TBL/Content, not as part
+            # of the mod content tree. If a caller points cooked_dir at a
+            # broader cooked root, do not package it under its source name;
+            # _mod_asset_registry_entry adds the intentional renamed entry.
+            if root == os.path.abspath(cooked_dir) and name == 'AssetRegistry.bin':
+                continue
             source = os.path.join(root, name)
             if os.path.exists(replacement) and (root == replacement or root.startswith(replacement + os.sep)):
                 inner = os.path.relpath(root, replacement).replace(os.sep, '/')
