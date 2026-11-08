@@ -51,6 +51,23 @@ def _mono():
     return time.time()
 
 
+def stall_probe(tag):
+    """Busy pure-Python burst whose wall duration exposes scheduling starvation.
+
+    A healthy interpreter completes this in a fraction of a second. If the same
+    burst takes multiple seconds while running inside the editor, the worker
+    thread is starved (UE 4.25 editor Python holds the GIL on the game thread;
+    deploy's async pak runs on a background thread).
+    """
+    started = _mono()
+    total = 0
+    i = 0
+    while i < 3000000:
+        total += i
+        i += 1
+    print('[deploy-step] stall {0}: busy-burst w{1:.2f}s'.format(tag, _mono() - started))
+
+
 def _dump_steps(mod):
     """Print one consolidated timing line for the whole pak (labels in order)."""
     if not _STEPS:
@@ -228,6 +245,11 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     """
     if not result.get('success'):
         raise RuntimeError('The cook of {0} failed: nothing to pak'.format(result.get('mod')))
+    # Busy-burst probes bracket the whole pak: if the END burst also takes many
+    # seconds, the worker thread is starved and the step wall times below are
+    # scheduling artifacts, not disk/UnrealPak reality. (The entry burst lands
+    # on whatever the worker thread was doing before pak_mod.)
+    stall_probe('pak-entry')
     _step('find_engine')
     engine_root = engine.find_engine(ue4_root)
     _step('makedirs')
@@ -250,15 +272,16 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
         _step('parse_partition')
         if not entries:
             raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
+        _step('partition_total')
 
         total_size = sum(e[2] for e in entries)
         threshold = parse_size(max_pak_size) if max_pak_size else None
+        _step('partition_plan')
         if threshold is not None and total_size > threshold:
             parts = _partition_entries(entries, threshold)
         else:
             parts = [entries]
         multi = len(parts) > 1
-
         _step('discover_unrealpak')
         unrealpak_run = unrealpak.discover_unrealpak(engine_root=engine_root)
         token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
@@ -279,8 +302,9 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
                 unrealpak.run_list(unrealpak_run, temp_pak, log_path=temp_listing)
             else:
                 write_listing(part, temp_listing)
-            _step('publish')
+            _step('publish_pak')
             provenance._replace_file(temp_pak, article)
+            _step('publish_listing')
             provenance._replace_file(temp_listing, listing_path)
             _step('part_done')
             print('pak part: {0} ({1} files, {2} bytes)'.format(
@@ -304,6 +328,7 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
 
     print('pak: {0} ({1} asset(s), {2} part(s))'.format(
         ', '.join(published), len(entries), len(published)))
+    stall_probe('pak-exit')
     _dump_steps(result['mod'])
     return published[0] if len(published) == 1 else published
 

@@ -64,15 +64,19 @@ def validate_cooked_output(cooked_root, manifest_path, mod, current_sources):
 
     Returns the manifest dict, or raises RuntimeError with a clear reason.
     """
+    started = time.time()
     manifest = read_manifest(manifest_path)
+    read_dt = time.time() - started
     if not manifest or manifest.get('complete') is not True:
         raise RuntimeError('no completed cook provenance found at {0}'.format(manifest_path))
     if manifest.get('mod') != mod:
         raise RuntimeError('cook provenance belongs to {0}, not {1}'.format(manifest.get('mod'), mod))
+    compared = time.time()
     if manifest.get('source_files') != current_sources:
         raise RuntimeError('cooked output is stale: source assets changed since the recorded cook ({0})'.format(manifest_path))
     if not os.path.isdir(cooked_root):
         raise RuntimeError('cooked output directory is missing: {0}'.format(cooked_root))
+    walk_started = time.time()
     found = False
     for _root, _dirs, files in os.walk(cooked_root):
         if files:
@@ -80,4 +84,10 @@ def validate_cooked_output(cooked_root, manifest_path, mod, current_sources):
             break
     if not found:
         raise RuntimeError('cooked output directory is empty: {0}'.format(cooked_root))
+    total = time.time() - started
+    if total > 2.0:
+        # Slow-validate breadcrumb: separates manifest read / dict compare /
+        # directory walk so an in-editor outlier is diagnosable from the log.
+        print('[deploy] provenance validate took {0:.2f}s (read={1:.2f} compare={2:.2f} walk={3:.2f})'.format(
+            total, read_dt, walk_started - compared, time.time() - walk_started))
     return manifest
