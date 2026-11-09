@@ -65,6 +65,32 @@ If wall time is much larger than CPU for a phase, that phase was mostly waiting
 (GIL/descheduling) rather than working. Async paking resolves project/engine on the
 game thread before the worker starts, so Unreal API calls stay off the worker thread.
 
+## Map markers: which maps get cooked
+
+If the mod folder contains a **map marker** (`DA_MapMarker_V2` or a subclass; maintained with the
+right-click / toolbar actions that ship with the SDK's `ModLoading/Python` scripts), the cook uses it:
+
+- Every non-map asset in the folder is cooked as before.
+- A map is cooked only if the marker needs it: its shipped maps, `ExtraRequiredMaps`, and the sublevel
+  layers those need (`ShippedMapLayers`, recomputed from the registry at cook time). Other maps in the
+  folder - backups, ignored maps - and their `<Map>_BuiltData` are skipped.
+- Layers that live **outside** the mod folder (base game or another mod) are listed in the log but not
+  cooked explicitly; they cannot be part of this mod's pak.
+- The marker is read from the Asset Registry; no map is loaded. A marker that cannot be read fails the
+  cook rather than silently cooking everything.
+- The log says what happened: `[deploy] map marker X: cooking N map(s) ...; skipping M package(s)`.
+
+Notes:
+
+- **Editor only.** Outside the editor (`python deploy.py cook`) there is no `unreal` module to read the
+  marker with, so every map is cooked. An SDK without the map marker scripts also cooks everything.
+  `DEPLOY_IGNORE_MAP_MARKER=1` turns the marker off for a run.
+- **Stale output is cleaned up.** The cooker keeps its output folder between runs and the pak packs
+  whatever is in it. When the cook list shrinks (a map was dropped from the marker, an asset deleted), or
+  a marker is used and the previous cook is unknown, that one cook runs without `-iterate`, which makes
+  the engine clear the folder first (only the first chunk of a chunked cook does this). The manifest
+  records `cooked_packages`, `skipped_packages` and `map_markers`.
+
 ## CLI (non-editor)
 
 ```bash

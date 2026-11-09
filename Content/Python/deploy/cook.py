@@ -22,11 +22,12 @@ import os
 import subprocess
 import time
 
-from deploy import engine
+from deploy import engine, maps, provenance
 
 PROJECT_NAME = 'TBL'
 MOD_ROOT_DEFAULT = '/Game/Mods/AgMods/'
 MAX_PACKAGES_PER_RUN = 250
+BUILT_DATA_SUFFIX = '_BuiltData'  # <Map>_BuiltData.uasset sits beside <Map>.umap
 
 # Step timing for one cook, collected on the orchestrating thread and printed
 # once when the cook finishes (avoids per-line print/flush lag). Records BOTH
@@ -74,19 +75,87 @@ def _content_dir(uproject):
     return os.path.join(os.path.dirname(uproject), 'Content')
 
 
-def collect_packages(uproject, mod_dir):
-    """Package names of every .uasset/.umap below the mod folder (disk scan)."""
+def scan_packages(uproject, mod_dir):
+    """[(package, is_map)] for every .uasset/.umap below the mod folder (disk scan)."""
     folder = os.path.join(_content_dir(uproject), mod_dir[len('/Game/'):].replace('/', os.sep))
     if not os.path.isdir(folder):
         raise RuntimeError('Mod folder not found: {0}'.format(folder))
-    packages = []
+    entries = []
     for root, _dirs, files in os.walk(folder):
         for name in files:
             base, ext = os.path.splitext(name)
             if ext.lower() in ('.uasset', '.umap'):
                 relative = os.path.relpath(os.path.join(root, base), _content_dir(uproject)).replace(os.sep, '/')
-                packages.append('/Game/' + relative)
-    return sorted(packages)
+                entries.append(('/Game/' + relative, ext.lower() == '.umap'))
+    return sorted(entries)
+
+
+def collect_packages(uproject, mod_dir):
+    """Package names of every .uasset/.umap below the mod folder (disk scan)."""
+    return [package for package, _is_map in scan_packages(uproject, mod_dir)]
+
+
+def select_packages(entries, required_maps=None):
+    """Apply a map marker's plan to the folder's packages -> (packages to cook, skipped packages).
+
+    entries: [(package, is_map)]. required_maps=None keeps everything. Otherwise every non-map package
+    stays, a map stays only if it is required, and the <Map>_BuiltData asset of a skipped map is skipped
+    with it (it would otherwise be cooked on its own, lightmaps and all).
+    """
+    if required_maps is None:
+        return sorted(package for package, _is_map in entries), []
+    required = set(required_maps)
+    skipped_maps = set(package for package, is_map in entries if is_map and package not in required)
+    skipped_built = set(package + BUILT_DATA_SUFFIX for package in skipped_maps)
+    keep, skipped = [], []
+    for package, _is_map in entries:
+        (skipped if package in skipped_maps or package in skipped_built else keep).append(package)
+    return sorted(keep), sorted(skipped)
+
+
+def plan_packages(uproject, mod_dir, plan=None):
+    """The cook list for a mod folder, optionally narrowed by a map plan (see deploy.maps).
+
+    Returns {'packages': [...], 'skipped': [...], 'external': [...], 'missing': [...]}:
+    - packages: what to cook - the folder's packages that survive the plan
+    - skipped: folder packages left out (maps the marker does not need, and their _BuiltData)
+    - external: required maps OUTSIDE the folder that exist (a layer that belongs to the base game or
+      another mod). Reported only: they are not listed for the cook, because this mod's pak cannot contain
+      them and the cooker already follows references to outside content on its own
+    - missing: required maps that exist nowhere (a stale marker entry)
+    """
+    entries = scan_packages(uproject, mod_dir)
+    if plan is None:
+        return {'packages': sorted(package for package, _m in entries), 'skipped': [], 'external': [], 'missing': []}
+    required = set(plan['maps'])
+    packages, skipped = select_packages(entries, required)
+    prefix = mod_dir.rstrip('/') + '/'
+    in_folder = set(package for package, is_map in entries if is_map)
+    external, missing = [], []
+    for package in sorted(required):
+        if package in in_folder or not package.startswith('/Game/'):
+            continue
+        path = os.path.join(_content_dir(uproject), package[len('/Game/'):].replace('/', os.sep) + '.umap')
+        if not package.startswith(prefix) and os.path.isfile(path):
+            external.append(package)
+        else:
+            missing.append(package)
+    return {'packages': packages, 'skipped': skipped, 'external': external, 'missing': missing}
+
+
+def needs_clean_cook(previous_packages, new_packages, marker_active, has_output):
+    """True when the cooker output folder must be rebuilt from scratch.
+
+    The cooker keeps its output folder between runs (-iterate), and the pak packs whatever is in it. So
+    a package cooked earlier but not cooked now would be packed anyway. A non-iterative cook makes the
+    engine wipe the folder. Rebuild when the cook list shrank, or - with a map plan - when the previous
+    cook is unknown (no recorded package list) and there is output that could contain stale maps.
+    """
+    if not has_output:
+        return False
+    if previous_packages is None:
+        return bool(marker_active)
+    return bool(set(previous_packages) - set(new_packages))
 
 
 def source_manifest(uproject, mod_dir):
@@ -107,12 +176,18 @@ def source_manifest(uproject, mod_dir):
 
 # -- commandlet ----------------------------------------------------------------
 
-def cook_command(engine_root, uproject, packages, out_dir, log_path):
-    """The UE4Editor-Cmd.exe -run=Cook -cooksinglepackage command list."""
-    return [engine.engine_cmd_path(engine_root), uproject, '-run=Cook', '-TargetPlatform=WindowsNoEditor',
-            '-cooksinglepackage', '-Map=' + '+'.join(packages), '-unversioned', '-skipeditorcontent',
-            '-iterate', '-OutputDir=' + out_dir, '-fileopenlog', '-stdout', '-CrashForUAT',
-            '-unattended', '-NoLogTimes', '-UTF8Output', '-abslog=' + log_path]
+def cook_command(engine_root, uproject, packages, out_dir, log_path, iterate=True):
+    """The UE4Editor-Cmd.exe -run=Cook -cooksinglepackage command list.
+
+    iterate=False omits -iterate, which makes the engine clear the output folder first.
+    """
+    command = [engine.engine_cmd_path(engine_root), uproject, '-run=Cook', '-TargetPlatform=WindowsNoEditor',
+               '-cooksinglepackage', '-Map=' + '+'.join(packages), '-unversioned', '-skipeditorcontent']
+    if iterate:
+        command.append('-iterate')
+    command += ['-OutputDir=' + out_dir, '-fileopenlog', '-stdout', '-CrashForUAT',
+                '-unattended', '-NoLogTimes', '-UTF8Output', '-abslog=' + log_path]
+    return command
 
 
 def _read(path):
@@ -138,8 +213,14 @@ class CookJob(object):
     """A running cook (one or more commandlet runs, chunked). poll() never blocks."""
 
     def __init__(self, mod, uproject, engine_root, packages, out_dir, log_path, source_files,
-                 max_chunk=MAX_PACKAGES_PER_RUN, mod_dir=None, _start=True):
+                 max_chunk=MAX_PACKAGES_PER_RUN, mod_dir=None, _start=True,
+                 iterate=True, manifest_extra=None, plan_info=None):
         self.mod, self.uproject, self.engine_root = mod, uproject, engine_root
+        # iterate=False cleans the output folder, which only the FIRST chunk may do: a later chunk
+        # would wipe the earlier chunks' output (all chunks share one OutputDir).
+        self.iterate = iterate
+        self.manifest_extra = manifest_extra
+        self.plan_info = plan_info
         self.packages = packages
         self.out_dir, self.log_path = out_dir, log_path
         self.source_files = source_files
@@ -157,6 +238,10 @@ class CookJob(object):
         if _start:
             self._next()
 
+    def chunk_iterates(self, index):
+        """Whether chunk `index` runs with -iterate (only chunk 0 may rebuild from scratch)."""
+        return self.iterate or index > 0
+
     def _next(self):
         self.index += 1
         if self.index >= len(self.chunks):
@@ -168,7 +253,8 @@ class CookJob(object):
         self._chunk_start = time.time()
         try:
             self.process = subprocess.Popen(
-                cook_command(self.engine_root, self.uproject, self.chunks[self.index], self.out_dir, log_path),
+                cook_command(self.engine_root, self.uproject, self.chunks[self.index], self.out_dir, log_path,
+                             iterate=self.chunk_iterates(self.index)),
                 stdout=self._devnull, stderr=subprocess.STDOUT,
                 creationflags=engine.subprocess_flags())
         except Exception as error:
@@ -215,12 +301,13 @@ class CookJob(object):
         self.result = {'success': ok, 'mod': self.mod, 'mod_dir': self.mod_dir, 'packages': len(self.packages),
                        'cooked_dir': self.cooked_dir, 'log': self._chunk_log,
                        'seconds': round(time.time() - self.began, 1),
-                       'errors': self.errors, 'chunks': len(self.chunks)}
+                       'errors': self.errors, 'chunks': len(self.chunks), 'map_plan': self.plan_info}
         if ok:
             _step('manifest')
             try:
                 from deploy import provenance
-                provenance.write_manifest(self.manifest_path, self.mod, self.source_files, self.cooked_dir)
+                provenance.write_manifest(self.manifest_path, self.mod, self.source_files, self.cooked_dir,
+                                          extra=self.manifest_extra)
                 self.result['manifest'] = self.manifest_path
             except Exception as error:
                 self.result['success'] = False
@@ -236,8 +323,38 @@ class CookJob(object):
 
 # -- orchestration -------------------------------------------------------------
 
-def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN):
-    """Start cooking one mod folder in a separate UE4Editor-Cmd process. Returns a CookJob."""
+def _log_plan(mod_dir, plan, selection, clean):
+    """Say what the map marker changed about this cook (visible in the Output Log / console)."""
+    if plan is not None:
+        names = lambda packages: ', '.join(p.split('/')[-1] for p in packages)  # noqa: E731
+        print('[deploy] map marker {0}: cooking {1} map(s) ({2} shipped, {3} extra, {4} layer(s)); '
+              'skipping {5} package(s)'.format(', '.join(m.split('/')[-1] for m in plan['markers']),
+                                               len(plan['maps']) - len(selection['missing']) - len(selection['external']),
+                                               len(plan['shipped']), len(plan['extra']), len(plan['layers']),
+                                               len(selection['skipped'])))
+        if selection['skipped']:
+            shown = selection['skipped'][:15]
+            more = ' ... +{0} more'.format(len(selection['skipped']) - len(shown)) if len(selection['skipped']) > len(shown) else ''
+            print('[deploy]   skipped: {0}{1}'.format(names(shown), more))
+        if selection['external']:
+            print('[deploy]   layers outside {0} (provided by the base game or another mod, not part of this pak): {1}'.format(
+                mod_dir, names(selection['external'])))
+        if selection['missing']:
+            print('[deploy] WARNING: the marker lists map(s) that do not exist: {0}'.format(names(selection['missing'])))
+        if not plan['maps']:
+            print('[deploy] WARNING: the map marker lists no maps, so no map in {0} will be cooked'.format(mod_dir))
+    if clean:
+        print('[deploy] cooking {0} from scratch: the cook list shrank or the previous cook is unknown, '
+              'so the engine clears the old output (no stale maps in the pak)'.format(mod_dir))
+
+
+def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN,
+               use_marker=True):
+    """Start cooking one mod folder in a separate UE4Editor-Cmd process. Returns a CookJob.
+
+    use_marker=True (default) lets a map marker in the folder decide which maps are cooked (editor only,
+    see deploy.maps); DEPLOY_IGNORE_MAP_MARKER=1 turns it off for a run.
+    """
     if max_chunk is None:
         max_chunk = MAX_PACKAGES_PER_RUN
     del _STEPS[:]
@@ -246,8 +363,11 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     _step('find_engine')
     engine_root = engine.find_engine(ue4_root, uproject=uproject)
     mod_dir = mod_package_dir(mod)
+    _step('map_plan')
+    plan = maps.marker_plan(mod_dir) if use_marker else None
     _step('collect_packages')
-    packages = collect_packages(uproject, mod_dir)
+    selection = plan_packages(uproject, mod_dir, plan)
+    packages = selection['packages']
     _step('source_manifest')
     source_files = source_manifest(uproject, mod_dir)
     if not packages:
@@ -256,14 +376,25 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     saved = os.path.join(os.path.dirname(uproject), 'Saved')
     out_dir = os.path.abspath(out_dir or os.path.join(saved, 'CookedMod', name))
     old_manifest = os.path.join(out_dir, 'CookModManifest.json')
+    previous = provenance.read_manifest(old_manifest) if os.path.isfile(old_manifest) else None
     if os.path.isfile(old_manifest):
         os.remove(old_manifest)
+    clean = needs_clean_cook((previous or {}).get('cooked_packages'), packages, plan is not None,
+                             os.path.isdir(os.path.join(out_dir, PROJECT_NAME)))
+    _log_plan(mod_dir, plan, selection, clean)
     log_path = os.path.join(saved, 'Logs', 'CookMod_{0}.log'.format(name))
     if not os.path.isdir(os.path.dirname(log_path)):
         os.makedirs(os.path.dirname(log_path))
+    plan_info = None
+    if plan is not None:
+        plan_info = {'markers': plan['markers'], 'maps_cooked': len(plan['maps']) - len(selection['missing']) - len(selection['external']),
+                     'packages_skipped': len(selection['skipped']), 'missing': selection['missing'],
+                     'external': selection['external'], 'clean': clean}
     _step('spawn')
     return CookJob(name, uproject, engine_root, packages, out_dir, log_path, source_files,
-                   max_chunk=max_chunk, mod_dir=mod_dir)
+                   max_chunk=max_chunk, mod_dir=mod_dir, iterate=not clean, plan_info=plan_info,
+                   manifest_extra={'cooked_packages': packages, 'skipped_packages': selection['skipped'],
+                                   'map_markers': plan['markers'] if plan is not None else []})
 
 
 def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN):

@@ -611,6 +611,7 @@ def _dry_cook(mod, args):
     log_path = os.path.join(saved, 'Logs', 'CookMod_{0}.log'.format(name))
     chunks = [packages[i:i + args.max_chunk] for i in range(0, len(packages), args.max_chunk)]
     print('# dry-run: {0} packages, {1} chunk(s) -> {2}'.format(len(packages), len(chunks), out))
+    print('# note: a map marker only narrows the cook when cooking from the editor; this lists every map')
     for idx, chunk in enumerate(chunks):
         logp = log_path if len(chunks) == 1 else log_path.replace('.log', '_{0}.log'.format(idx + 1))
         print(' '.join(_cook.cook_command(engine_root, uproject, chunk, out, logp)))

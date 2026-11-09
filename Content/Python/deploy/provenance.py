@@ -31,14 +31,20 @@ def _replace_file(source, destination):
     os.rename(source, destination)
 
 
-def write_manifest(path, mod, source_files, cooked_dir):
-    """Publish provenance only after a completed (final-chunk) cook."""
+def write_manifest(path, mod, source_files, cooked_dir, extra=None):
+    """Publish provenance only after a completed (final-chunk) cook.
+
+    `extra` adds fields (the cook records cooked_packages / skipped_packages / map_markers).
+    """
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         os.makedirs(parent)
     temporary = path + '.tmp.{0}'.format(os.getpid())
     payload = {'complete': True, 'mod': mod, 'source_files': source_files,
                'cooked_dir': cooked_dir, 'completed': time.time()}
+    if extra:
+        for key, value in extra.items():
+            payload.setdefault(key, value)
     try:
         with open(temporary, 'w') as handle:
             json.dump(payload, handle, sort_keys=True, indent=2)
