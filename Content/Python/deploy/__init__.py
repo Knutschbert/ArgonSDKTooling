@@ -116,8 +116,9 @@ _OP = {'state': 'idle', 'mod': None, 'success': None, 'result': None, 'error': N
 
 def poll():
     """Overall status for the widget tick: a dict with 'state' in
-    idle/cooking/paking/done, the current 'mod', 'index'/'total', and when done
-    'success'/'result'/'error'."""
+    idle/cooking/paking/done/error, the current 'mod', 'index'/'total'. A finished
+    run is 'done' (every mod succeeded; 'success' True) or 'error' (at least one
+    mod failed; 'success' False and 'error' lists each failure as 'mod: reason')."""
     return dict(_OP)
 
 
@@ -132,9 +133,24 @@ def _set(state, mod=None, success=None, result=None, error=None, index=None, tot
 # Current run: the mods queue (+ how to process each) for multi-mod runs.
 _QUEUE = []
 _CTX = {'mods': [], 'dest': None, 'upr': None, 'eng': None,
-        'do_cook': False, 'do_pak': False, 'all_ok': True, 'total': 0,
+        'do_cook': False, 'do_pak': False, 'all_ok': True, 'errors': [], 'total': 0,
         'max_chunk': None, 'max_pak_size': None,
         'prof': None}  # profiling: {'start': t0, 'mods': {mod: {...phases}}}
+
+
+def _note_error(mod, message):
+    """Remember one mod's failure so the final 'error' state can report all of them."""
+    _CTX['all_ok'] = False
+    _CTX['errors'].append('{0}: {1}'.format(mod, message) if mod else str(message))
+
+
+def _finalize(total):
+    """Terminal state: 'done' if every mod succeeded, else 'error' with all reasons."""
+    if _CTX['all_ok']:
+        _set('done', None, success=True, index=total, total=total)
+    else:
+        _set('error', None, success=False, error='; '.join(_CTX['errors']) or 'unknown error',
+             index=total, total=total)
 
 
 def _stop_tick_callback():
@@ -173,7 +189,7 @@ def _start_next_mod():
 def _finish_op(success, error=None, result=None):
     """Record a completed mod, pop it, and let the next tick continue the queue."""
     if not success:
-        _CTX['all_ok'] = False
+        _note_error(_OP.get('mod'), error or 'failed')
     if _QUEUE:
         _QUEUE.pop(0)
     _OP['result'] = result if success else None
@@ -224,7 +240,7 @@ def _tick(_delta=0.0):
         _start_next_mod()
         return
     _prof_summary()
-    _set('done', None, success=_CTX['all_ok'], index=_CTX['total'], total=_CTX['total'])
+    _finalize(_CTX['total'])
     _stop_tick_callback()
 
 
@@ -300,7 +316,7 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
 
     Drives the same poll() state machine as single runs: poll() reports the
     current 'mod' and 'index'/'total' while working, and lands on
-    state='done' (with 'success') when all mods are processed. A single mod
+    state='done' when all mods succeed, or state='error' (with 'error' text) if any failed. A single mod
     string is treated as a one-element list.
 
     In the editor this returns immediately and work proceeds on the Slate tick
@@ -320,10 +336,10 @@ def start_many(mods, dest_dir=None, uproject_path=None, engine_dir=None, do_cook
         return
     if do_pak and not dest_dir:
         _log('No destination folder for the pak (DestDir is empty).', True)
-        _set('done', None, success=False, error='no destination folder for the pak', index=0, total=len(mods))
+        _set('error', None, success=False, error='no destination folder for the pak', index=0, total=len(mods))
         return
     _CTX.update(mods=mods, dest=dest_dir, upr=uproject_path, eng=engine_dir,
-                do_cook=do_cook, do_pak=do_pak, all_ok=True, total=len(mods),
+                do_cook=do_cook, do_pak=do_pak, all_ok=True, errors=[], total=len(mods),
                 max_chunk=max_chunk, max_pak_size=max_pak_size)
     _prof_reset()
     _log('profile run start: {0} mod(s), cook={1}, pak={2}{3}'.format(
@@ -347,8 +363,7 @@ def _blocking_many():
             result = _cook.cook_mod(mod, _CTX['upr'], _CTX['eng'], max_chunk=_CTX['max_chunk'])
             _prof_phase(mod, 'cook_end', 'done' if result.get('success') else 'failed')
             if not result['success']:
-                _CTX['all_ok'] = False
-                _OP['error'] = '; '.join(result.get('errors') or [])
+                _note_error(mod, '; '.join(result.get('errors') or []) or 'cook failed')
                 continue
             if _CTX['do_pak']:
                 _set('paking', mod, index=idx, total=total)
@@ -358,8 +373,7 @@ def _blocking_many():
                     _OP['result'] = _pak.pak_mod(result, dest, _CTX['eng'], max_pak_size=_CTX['max_pak_size'], run_list=False)
                     _prof_phase(mod, 'pak_end', 'done')
                 except Exception as error:  # noqa: BLE001
-                    _CTX['all_ok'] = False
-                    _OP['error'] = str(error)
+                    _note_error(mod, str(error))
         else:  # pak-only
             _set('paking', mod, index=idx, total=total)
             _prof_phase(mod, 'pak_start', 'provenance-validating cooked output')
@@ -367,10 +381,9 @@ def _blocking_many():
                 _OP['result'] = _pak_cooked(mod, None, dest, _CTX['upr'], _CTX['eng'], _CTX['max_pak_size'])
                 _prof_phase(mod, 'pak_end', 'done')
             except Exception as error:  # noqa: BLE001
-                _CTX['all_ok'] = False
-                _OP['error'] = str(error)
+                _note_error(mod, str(error))
     _prof_summary()
-    _set('done', None, success=_CTX['all_ok'], index=total, total=total)
+    _finalize(total)
 
 
 def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_cook, do_pak):
@@ -389,6 +402,30 @@ def run_from_widget(mod_name, mod_dir, uproject_path, engine_dir, dest_dir, do_c
                do_cook=do_cook, do_pak=do_pak)
 
 
+def _pak_prepare(mod, dest_dir, uproject_path, validate=True, log=_log):
+    """Resolve the cooked output for `mod` (optionally provenance-validating it).
+
+    Returns the cook-result dict pak_mod / PakJob expect.
+    """
+    from . import provenance
+    _pak._STEPS[:] = []  # fresh per-mod step timing
+    _pak._step('resolve_project')
+    uproject = _engine.find_project(uproject_path)
+    mod_dir = _cook.mod_package_dir(mod)
+    name = mod_dir.rstrip('/').split('/')[-1]
+    cooked_root = os.path.join(os.path.dirname(uproject), 'Saved', 'CookedMod', name)
+    cooked = os.path.join(cooked_root, 'TBL', 'Content', mod_dir[len('/Game/'):].replace('/', os.sep))
+    manifest = os.path.join(cooked_root, 'CookModManifest.json')
+    if validate:
+        _pak._step('source_manifest')
+        sources = _cook.source_manifest(uproject, mod_dir)
+        _pak._step('validate')
+        provenance.validate_cooked_output(cooked, manifest, name, sources)
+        _pak._step('validated_log')
+        log('cook provenance validated: {0}'.format(manifest))
+    return {'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked}
+
+
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log, validate=True, run_list=False):
     """Pak already-cooked output, validating provenance (pak-only mode).
 
@@ -401,61 +438,56 @@ def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_s
     run_list=False (default) skips the separate UnrealPak -List pass (writes the
     .txt locally); run_list=True re-runs -List for extra validation.
     """
-    from . import provenance
-    _pak._STEPS[:] = []  # fresh per-mod step timing
-    _pak._step('resolve_project')
-    uproject = _engine.find_project(uproject_path)
-    mod_dir = _cook.mod_package_dir(mod)
-    name = mod_dir.rstrip('/').split('/')[-1]
-    cooked_root = os.path.join(os.path.dirname(uproject), 'Saved', 'CookedMod', name)
-    cooked = os.path.join(cooked_root, 'TBL', 'Content', mod_dir[len('/Game/'):].replace('/', os.sep))
-    manifest = os.path.join(cooked_root, 'CookModManifest.json')
-    sources = None
-    if validate:
-        _pak._step('source_manifest')
-        sources = _cook.source_manifest(uproject, mod_dir)
-        _pak._step('validate')
-        provenance.validate_cooked_output(cooked, manifest, name, sources)
-        _pak._step('validated_log')
-        log('cook provenance validated: {0}'.format(manifest))
+    result = _pak_prepare(mod, dest_dir, uproject_path, validate=validate, log=log)
     _pak._step('pak_mod')
-    return _pak.pak_mod({'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked},
-                        dest_dir, engine_dir, max_pak_size=max_pak_size, run_list=run_list)
+    return _pak.pak_mod(result, dest_dir, engine_dir, max_pak_size=max_pak_size, run_list=run_list)
 
 
 # -- async pak (non-blocking, poll from a widget tick) --------------------------
 
 _PAK_RUNNING = []
 _PAK_RESULT = []
+_PAK_JOB = []  # editor: the in-flight non-blocking pak.PakJob (no worker thread)
 
 
 def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=None, validate=True, run_list=False):
-    """Pak already-cooked output in the background (non-blocking).
+    """Pak already-cooked output (non-blocking). Poll with pak_poll() from a tick.
 
-    Poll with pak_poll() from a widget Event Tick. Returns immediately. The actual
-    UnrealPak work runs on a worker thread (pure file/subprocess - no engine/UI
-    calls), so it is safe; logging is routed to print, not unreal.log.
+    IN THE EDITOR no worker thread is used: the embedded Python 2.7 starves
+    background threads (the pak never started). Preparation runs here on the game
+    thread, UnrealPak runs as a subprocess, and pak_poll() (called each tick)
+    checks it without blocking - the same model as the cook.
+    Outside the editor (CLI) a daemon worker thread runs the blocking pak.
 
-    The project/engine are resolved HERE on the calling (game) thread before the
-    worker starts, so the worker never touches the Unreal API off the game thread.
+    The project/engine are resolved on the calling (game) thread first.
     validate=True (default) re-validates cook provenance first. Pass validate=False
-    when paking right after a just-finished cook (the manifest is already fresh) to
-    skip the redundant source re-walk. run_list=False (default) skips the separate
-    UnrealPak -List pass and writes the .txt from the entries locally.
+    when paking right after a just-finished cook (the manifest is already fresh).
+    run_list=False (default) skips the separate UnrealPak -List pass.
     """
     if _PAK_RUNNING:
         raise RuntimeError('a pak is already running; wait for pak_poll() before starting another')
-    # In the editor, resolve HERE on the calling (game) thread, then hand the
-    # RESOLVED paths to the worker so its find_project/find_engine short-circuit
-    # and never touch the Unreal API off the game thread. Outside the editor the
-    # worker resolves as before (pure file/registry, no Unreal API).
-    if _engine.in_editor():
+    editor = _engine.in_editor()
+    if editor:
         if uproject_path is None:
             uproject_path = _engine.find_project(uproject_path)
         if ue4_root is None:
             ue4_root = _engine.find_engine(ue4_root, uproject=uproject_path)
-    _PAK_RUNNING.append(True)
     del _PAK_RESULT[:]
+    del _PAK_JOB[:]
+
+    if editor:
+        try:
+            result = _pak_prepare(mod, dest_dir, uproject_path, validate=validate)
+            _pak._step('pak_job')
+            job = _pak.PakJob(result, dest_dir, ue4_root, max_pak_size=max_pak_size, run_list=run_list)
+        except Exception as error:  # noqa: BLE001
+            _PAK_RESULT.append(('error', None, str(error)))
+            return None
+        _PAK_JOB.append(job)
+        _PAK_RUNNING.append(True)
+        return None
+
+    _PAK_RUNNING.append(True)
 
     def _work():
         try:
@@ -473,8 +505,28 @@ def start_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_pak_size=Non
     return None
 
 
+def _advance_pak_job():
+    """Drive the in-flight PakJob one step (never blocks); record its outcome when finished."""
+    if not _PAK_JOB:
+        return
+    job = _PAK_JOB[0]
+    try:
+        path = job.poll()
+    except Exception as error:  # noqa: BLE001
+        del _PAK_JOB[:]
+        _PAK_RUNNING[:] = []
+        _PAK_RESULT.append(('error', None, str(error)))
+        return
+    if path is None:
+        return
+    del _PAK_JOB[:]
+    _PAK_RUNNING[:] = []
+    _PAK_RESULT.append(('ok', path, None))
+
+
 def pak_poll():
     """None while a pak is running; else (status, pak_path, error) - consumed ONCE."""
+    _advance_pak_job()
     if _PAK_RUNNING:
         return None
     if _PAK_RESULT:
@@ -483,8 +535,6 @@ def pak_poll():
         return result
     return None
 
-
-# -- CLI -----------------------------------------------------------------------
 
 def _main(argv=None):
     import argparse

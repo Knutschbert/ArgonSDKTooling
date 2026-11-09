@@ -163,17 +163,28 @@ def _call_default(command, log_path):
                                creationflags=engine.subprocess_flags())
 
 
-def run_create(unrealpak, temp_pak, filelist, compress=True, log_path=None, _call=None):
-    """Run UnrealPak -create=filelist [-compress]; validate exit code + non-empty pak."""
+def create_command(unrealpak, temp_pak, filelist, compress=True):
+    """UnrealPak -create command line (shared by blocking run_create and async PakJob)."""
     command = [unrealpak, temp_pak, '-create=' + filelist]
     if compress:
         command.append('-compress')
-    log = log_path or temp_pak + '.create.log'
-    code = (_call or _call_default)(command, log)
+    return command
+
+
+def check_create(code, temp_pak, log):
+    """Validate a finished UnrealPak create: exit code 0 and a non-empty pak."""
     if code != 0:
         raise RuntimeError('UnrealPak create failed with exit code {0}; see {1}'.format(code, log))
     if not os.path.isfile(temp_pak) or os.path.getsize(temp_pak) == 0:
         raise RuntimeError('UnrealPak create produced no usable pak: {0}'.format(temp_pak))
+
+
+def run_create(unrealpak, temp_pak, filelist, compress=True, log_path=None, _call=None):
+    """Run UnrealPak -create=filelist [-compress]; validate exit code + non-empty pak."""
+    command = create_command(unrealpak, temp_pak, filelist, compress)
+    log = log_path or temp_pak + '.create.log'
+    code = (_call or _call_default)(command, log)
+    check_create(code, temp_pak, log)
 
 
 def run_list(unrealpak, temp_pak, log_path=None, _call=None):

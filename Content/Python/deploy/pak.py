@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import os
 import shutil
+import subprocess
 import time
 from collections import OrderedDict
 
@@ -331,6 +332,154 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
     stall_probe('pak-exit')
     _dump_steps(result['mod'])
     return published[0] if len(published) == 1 else published
+
+
+# -- non-blocking pak (editor) ---------------------------------------------------
+
+class PakJob(object):
+    """A running pak driven by poll() - NO worker thread.
+
+    The editor's embedded Python 2.7 starves background threads (the worker never
+    got the GIL, so the async pak sat forever before its first line). So, like
+    cook.CookJob, all Python runs on the caller's (game) thread and only the
+    UnrealPak subprocess runs concurrently. Preparation (stage registry, entry
+    list, filelist) is quick file work done in __init__; poll() returns None while
+    UnrealPak runs, then the published pak path (str, or list when split) - or
+    raises RuntimeError on failure (temp files and the staged registry are always
+    cleaned up first).
+    """
+
+    def __init__(self, result, dest_dir, ue4_root=None, compress=True, max_pak_size=None,
+                 run_list=False, include_mod_asset_registry=True):
+        if not result.get('success'):
+            raise RuntimeError('The cook of {0} failed: nothing to pak'.format(result.get('mod')))
+        self.result, self.dest_dir, self.compress, self.run_list = result, dest_dir, compress, run_list
+        self.temps, self.published = [], []
+        self.staged_registry = None
+        self.process, self._log_handle, self._part = None, None, None
+        self.index = -1
+        self.path = None
+        self._done = False
+        try:
+            _step('find_engine')
+            engine_root = engine.find_engine(ue4_root)
+            if not os.path.isdir(dest_dir):
+                os.makedirs(dest_dir)
+            mod_dir = result.get('mod_dir') or ('/Game/Mods/AgMods/' + result['mod'])
+            if include_mod_asset_registry:
+                _step('stage_asset_registry')
+                self.staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
+            _step('build_entries')
+            entries = _build_entries(result['cooked_dir'], mod_dir)
+            if not entries:
+                raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
+            threshold = parse_size(max_pak_size) if max_pak_size else None
+            if threshold is not None and sum(e[2] for e in entries) > threshold:
+                self.parts = _partition_entries(entries, threshold)
+            else:
+                self.parts = [entries]
+            self.entries = entries
+            self.multi = len(self.parts) > 1
+            _step('discover_unrealpak')
+            self.unrealpak = unrealpak.discover_unrealpak(engine_root=engine_root)
+            self.token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
+            self._start_part()
+        except Exception:
+            self._cleanup()
+            raise
+
+    def _start_part(self):
+        self.index += 1
+        idx = self.index + 1
+        mod = self.result['mod']
+        part = self.parts[self.index]
+        stem = '{0}_part{1}'.format(mod, idx) if self.multi else mod
+        suffix = '_' + str(idx)
+        self._filelist = os.path.join(self.dest_dir, '.filelist_{0}{1}.txt'.format(self.token, suffix))
+        self._temp_pak = os.path.join(self.dest_dir, '.{0}{1}.pak.tmp'.format(self.token, suffix))
+        self._temp_listing = os.path.join(self.dest_dir, '.{0}{1}.txt.tmp'.format(self.token, suffix))
+        self._article = os.path.join(self.dest_dir, stem + '.pak')
+        self._listing_path = os.path.join(self.dest_dir, stem + '.txt')
+        self._create_log = self._temp_pak + '.create.log'
+        self._part = part
+        self.temps.extend([self._filelist, self._temp_pak, self._temp_listing,
+                           self._create_log, self._temp_pak + '.list.log'])
+        _step('write_filelist')
+        write_entries(part, self._filelist)
+        _step('run_create')
+        self._log_handle = open(self._create_log, 'wb')
+        self.process = subprocess.Popen(
+            unrealpak.create_command(self.unrealpak, self._temp_pak, self._filelist, self.compress),
+            stdout=self._log_handle, stderr=subprocess.STDOUT,
+            creationflags=engine.subprocess_flags())
+
+    def _close_log(self):
+        if self._log_handle is not None:
+            try:
+                self._log_handle.close()
+            except Exception:
+                pass
+            self._log_handle = None
+
+    def _cleanup(self):
+        self._close_log()
+        for path in self.temps:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        if self.staged_registry:
+            try:
+                if os.path.exists(self.staged_registry):
+                    os.remove(self.staged_registry)
+            except OSError:
+                pass
+            self.staged_registry = None
+
+    def cancel(self):
+        if self.process is not None and self.process.poll() is None:
+            try:
+                self.process.terminate()
+            except Exception:
+                pass
+        self._cleanup()
+
+    def poll(self):
+        """None while running; the pak path(s) once published; RuntimeError on failure."""
+        if self._done:
+            return self.path
+        try:
+            if self.process.poll() is None:
+                return None
+            self._close_log()
+            unrealpak.check_create(self.process.returncode, self._temp_pak, self._create_log)
+            _step('run_list')
+            if self.run_list:
+                unrealpak.run_list(self.unrealpak, self._temp_pak, log_path=self._temp_listing)
+            else:
+                write_listing(self._part, self._temp_listing)
+            _step('publish_pak')
+            provenance._replace_file(self._temp_pak, self._article)
+            provenance._replace_file(self._temp_listing, self._listing_path)
+            print('pak part: {0} ({1} files, {2} bytes)'.format(
+                self._article, len(self._part), sum(e[2] for e in self._part)))
+            self.published.append(self._article)
+            if self.index + 1 < len(self.parts):
+                self._start_part()
+                return None
+        except Exception:
+            self._cleanup()
+            self._done = True
+            raise
+        self._cleanup()
+        self._done = True
+        print('pak: {0} ({1} asset(s), {2} part(s))'.format(
+            ', '.join(self.published), len(self.entries), len(self.published)))
+        _step('done')
+        _dump_steps(self.result['mod'])
+        self.path = self.published[0] if len(self.published) == 1 else self.published
+        return self.path
 
 
 def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=250, max_pak_size=None, run_list=False):

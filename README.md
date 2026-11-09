@@ -49,7 +49,7 @@ deploy.pak_mod(result, dest, run_list=True)    # also run UnrealPak -List to val
 # TBL/Content/<mod-path>/ModAssetRegistry.bin (never project-root Content/AssetRegistry.bin).
 
 # widget Event Tick -> read state
-s = deploy.poll()          # state: idle/cooking/paking/done; mod; index/total;
+s = deploy.poll()          # state: idle/cooking/paking/done/error; mod; index/total;
                            # when done: success/result/error
 ```
 

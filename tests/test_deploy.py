@@ -152,48 +152,69 @@ class PakAsyncTests(TempCase):
             while time.time() < deadline and deploy.pak_poll() is None:
                 time.sleep(0.02)
 
-    def test_editor_resolves_before_worker(self):
-        """In the editor, project/engine are resolved on the calling thread and the
-        worker receives resolved paths (so it never calls unreal off the game thread)."""
-        import time
+    def test_editor_uses_job_not_thread(self):
+        """In the editor the pak is a polled PakJob (no worker thread - the editor's
+        Python 2.7 starves threads), built from paths resolved on the game thread."""
+        import threading
+        seen = {}
 
-        resolved = {}
+        class FakeJob(object):
+            def __init__(self, result, dest, ue4_root=None, **kw):
+                seen['engine'] = ue4_root
+                seen['threads'] = threading.active_count()
+                self.polls = 0
 
-        def fake_find_project(path):
-            resolved['project'] = 'P:/resolved/TBL.uproject'
-            return resolved['project']
+            def poll(self):
+                self.polls += 1
+                return None if self.polls < 3 else os.path.join('out', 'A.pak')
 
-        def fake_find_engine(root, uproject=None):
-            resolved['engine'] = 'P:/resolved/Engine'
-            return resolved['engine']
-
-        def capture_pak(mod, _d, dest, up, ue, max_pak_size=None, log=print, **kw):
-            resolved['worker_uproject'] = up
-            resolved['worker_engine'] = ue
-            return dest + '/' + mod + '.pak'
-
-        saved_in_editor, saved_fp, saved_fe, saved_pak_cooked = (
-            deploy._engine.in_editor, deploy._engine.find_project,
-            deploy._engine.find_engine, deploy._pak_cooked)
+        saved = (deploy._engine.in_editor, deploy._engine.find_project,
+                 deploy._engine.find_engine, deploy._pak_prepare, deploy._pak.PakJob)
+        before = threading.active_count()
         deploy._engine.in_editor = lambda: True
-        deploy._engine.find_project = fake_find_project
-        deploy._engine.find_engine = fake_find_engine
-        deploy._pak_cooked = capture_pak
+        deploy._engine.find_project = lambda path: 'P:/resolved/TBL.uproject'
+        deploy._engine.find_engine = lambda root, uproject=None: 'P:/resolved/Engine'
+        deploy._pak_prepare = lambda mod, dest, up, validate=True, log=None: {'success': True, 'mod': mod}
+        deploy._pak.PakJob = FakeJob
         try:
             deploy.start_pak('A', 'out')
-            deadline = time.time() + 5
-            while time.time() < deadline and deploy.pak_poll() is None:
-                time.sleep(0.02)
-            self.assertEqual(resolved.get('project'), 'P:/resolved/TBL.uproject')
-            self.assertEqual(resolved.get('engine'), 'P:/resolved/Engine')
-            # worker must receive the RESOLVED values (no None -> no unreal call off-thread)
-            self.assertEqual(resolved.get('worker_uproject'), 'P:/resolved/TBL.uproject')
-            self.assertEqual(resolved.get('worker_engine'), 'P:/resolved/Engine')
+            self.assertEqual(seen['engine'], 'P:/resolved/Engine')
+            self.assertEqual(seen['threads'], before)  # no worker thread spawned
+            self.assertIsNone(deploy.pak_poll())
+            self.assertIsNone(deploy.pak_poll())
+            result = deploy.pak_poll()
+            self.assertEqual(result, ('ok', os.path.join('out', 'A.pak'), None))
+            self.assertIsNone(deploy.pak_poll())  # consumed once
         finally:
-            deploy._engine.in_editor, deploy._engine.find_project = saved_in_editor, saved_fp
-            deploy._engine.find_engine, deploy._pak_cooked = saved_fe, saved_pak_cooked
+            (deploy._engine.in_editor, deploy._engine.find_project, deploy._engine.find_engine,
+             deploy._pak_prepare, deploy._pak.PakJob) = saved
             deploy._PAK_RUNNING[:] = []
             deploy._PAK_RESULT[:] = []
+            deploy._PAK_JOB[:] = []
+
+    def test_editor_job_failure_is_reported(self):
+        class BoomJob(object):
+            def __init__(self, *a, **k):
+                pass
+
+            def poll(self):
+                raise RuntimeError('UnrealPak create failed')
+
+        saved = (deploy._engine.in_editor, deploy._pak_prepare, deploy._pak.PakJob)
+        deploy._engine.in_editor = lambda: True
+        deploy._pak_prepare = lambda mod, dest, up, validate=True, log=None: {'success': True, 'mod': mod}
+        deploy._pak.PakJob = BoomJob
+        try:
+            deploy.start_pak('A', 'out', uproject_path='x', ue4_root='y')
+            result = deploy.pak_poll()
+            self.assertEqual(result[0], 'error')
+            self.assertIn('UnrealPak create failed', result[2])
+            self.assertEqual(deploy._PAK_RUNNING, [])
+        finally:
+            deploy._engine.in_editor, deploy._pak_prepare, deploy._pak.PakJob = saved
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = []
+            deploy._PAK_JOB[:] = []
 
 
 class OperationStateTests(TempCase):
@@ -474,3 +495,31 @@ class _ThreadCookJob(object):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class ErrorStateTests(TempCase):
+    def test_failed_run_lands_in_error_state_with_reasons(self):
+        saved = (deploy._cook.cook_mod, deploy._engine.in_editor)
+        deploy._engine.in_editor = lambda: False
+
+        def fake_cook(mod, up=None, ue=None, max_chunk=None):
+            if mod == 'Bad':
+                return {'success': False, 'mod': mod, 'errors': ['boom']}
+            return {'success': True, 'mod': mod, 'cooked_dir': 'c/' + mod, 'mod_dir': '/Game/Mods/AgMods/' + mod}
+
+        deploy._cook.cook_mod = fake_cook
+        try:
+            deploy.start_many(['Good', 'Bad'], dest_dir=None, do_cook=True, do_pak=False)
+        finally:
+            deploy._cook.cook_mod, deploy._engine.in_editor = saved
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'error')
+        self.assertFalse(s['success'])
+        self.assertIn('Bad: boom', s['error'])
+        self.assertNotIn('Good', s['error'])
+
+    def test_missing_destination_is_error_state(self):
+        deploy.start_many(['A'], dest_dir=None, do_cook=False, do_pak=True)
+        s = deploy.poll()
+        self.assertEqual(s['state'], 'error')
+        self.assertIn('destination', s['error'])

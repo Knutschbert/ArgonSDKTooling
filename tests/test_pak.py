@@ -298,3 +298,50 @@ class PakSplitTests(TempCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class PakJobTests(PakModTests):
+    """Non-blocking PakJob with a REAL subprocess standing in for UnrealPak."""
+
+    def setUp(self):
+        super(PakJobTests, self).setUp()
+        import sys
+        self._cc = unrealpak.create_command
+        self.addCleanup(lambda: setattr(unrealpak, 'create_command', self._cc))
+        self.script = self._path('fake_unrealpak.py')
+        with open(self.script, 'w') as handle:
+            handle.write("import sys\nif sys.argv[2] == 'fail':\n    sys.exit(3)\n"
+                         "open(sys.argv[1], 'w').write('pak')\n")
+        unrealpak.discover_unrealpak = lambda *a, **k: 'UnrealPak.exe'
+        self._mode = 'ok'
+        unrealpak.create_command = lambda up, temp, filelist, compress=True: [
+            sys.executable, self.script, temp, self._mode]
+
+    def _drain(self, job):
+        import time
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            out = job.poll()
+            if out is not None:
+                return out
+            time.sleep(0.02)
+        self.fail('PakJob did not finish')
+
+    def test_job_publishes_without_blocking(self):
+        result = {'success': True, 'mod': 'MyMod', 'cooked_dir': self.cooked}
+        job = pak.PakJob(result, self.dest, ue4_root=self.engine_root)
+        path = self._drain(job)
+        self.assertEqual(path, os.path.join(self.dest, 'MyMod.pak'))
+        self.assertTrue(os.path.isfile(os.path.join(self.dest, 'MyMod.txt')))
+        self.assertEqual([n for n in os.listdir(self.dest) if n.startswith('.')], [])
+
+    def test_job_failure_raises_and_cleans_up(self):
+        self._mode = 'fail'
+        result = {'success': True, 'mod': 'MyMod', 'cooked_dir': self.cooked}
+        job = pak.PakJob(result, self.dest, ue4_root=self.engine_root)
+        with self.assertRaises(RuntimeError) as ctx:
+            self._drain(job)
+        self.assertIn('exit code 3', str(ctx.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.dest, 'MyMod.pak')))
+        self.assertEqual([n for n in os.listdir(self.dest) if n.startswith('.')], [])
+        self.assertFalse(os.path.exists(os.path.join(self.cooked, 'ModAssetRegistry.bin')))
