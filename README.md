@@ -53,6 +53,17 @@ s = deploy.poll()          # state: idle/cooking/paking/done/error; mod; index/t
                            # when done: success/result/error
 ```
 
+Widget notes (learned the hard way):
+- `poll()` sets `index = total` once a run is `done`, so a progress label `index+1 / total` reads `2/1` at the end; use
+  `min(index + 1, total)`.
+- Do not reset the UI with `SetTimerByEvent` from an Editor Utility Widget: the editor world's timer manager only ticks while
+  an editor viewport is realtime (`UEditorEngine::Tick` -> `LEVELTICK_TimeOnly` otherwise), so the timer may never fire. Count
+  down in the widget's tick instead.
+- `_tick` (the Slate post-tick that drives a run) is not re-entrant: `start_cook` can save assets (marker version stamping),
+  which pumps Slate and ticks again before the first job is registered. A nested tick used to start the same cook twice and
+  fail the second pak with "a pak is already running". Fixed with a re-entry guard (test:
+  `TickLoopTests.test_a_tick_during_start_cook_does_not_start_the_cook_twice`).
+
 Every cook and pak prints a consolidated `[deploy-step]` timing line (wall time `w` +
 per-thread CPU `c` per phase), so per-phase cost is visible in the Output Log:
 
@@ -90,6 +101,56 @@ Notes:
   a marker is used and the previous cook is unknown, that one cook runs without `-iterate`, which makes
   the engine clear the folder first (only the first chunk of a chunked cook does this). The manifest
   records `cooked_packages`, `skipped_packages` and `map_markers`.
+
+## Mod markers (`DA_ModMarker_V2`): nested mods, bundles, paks
+
+When the mod folder (or folders below it) contain V2 mod markers, the cook and pak use their plan (editor only; the
+SDK's `modmarker` module reads the markers from the Asset Registry, nothing is loaded):
+
+- **Version stamping.** Before cooking, `ModVersion` is stamped from the nearest `mod.json` `version` on the markers
+  whose `mod.json` applies (a root marker walks up; a nested one only uses its own folder's), only when it changed.
+  The same preflight stamps `ModVersion` on every mod actor class a marker lists (`ModActorClasses`) with that marker's
+  effective version (only when it differs; the actor Blueprint is loaded, changed and saved). With the marker option
+  `ApplyVersionToBundled` on the top marker, its version is also forced onto every other marker packed into its pak
+  (merged nested ones and `BundledMarkers`) and their actors, overriding their own `mod.json`; `OwnPak` markers keep theirs.
+  The log line is `[deploy] versions stamped: N marker(s), M mod actor class(es)`.
+- **Paks.** One pak per root marker, named after its `ModId`; nested markers merge into their root's pak. A nested
+  marker with `OwnPak` gets its own `<ModId>.pak` and is left out of the parent's. Size splitting (`--max-pak-size`)
+  applies to each pak on its own (`<stem>_partN`). Only the first pak carries `ModAssetRegistry.bin`.
+- **`_Content` folders.** Everything below ANY `_Content` folder inside a pak's tree (a marker's own, or one in a plain
+  subfolder such as `Mods/ModLoading/_Content`) is mounted at the game root (content replacement), with the path below that
+  `_Content` folder. If a real-path file and a `_Content` file target the same
+  path, the `_Content` one wins.
+- **`BundledMarkers`.** A marker may bundle markers from any directory: their folders are cooked with the mod and
+  packed under their own real paths (their map markers and `ExcludedPaths` apply). Edits there invalidate the
+  cook's provenance like the mod's own files do.
+- **`ExcludedPaths`.** Patterns relative to the marker's folder, case-insensitive, matched on the asset path without
+  extension: no wildcard = path prefix (`Old/`); `*` (any characters incl. `/`) and `?` (one character) must match the whole
+  path or a parent folder (`*_bak`, `*/Backup`, `Maps/*_old`). Excluded packages are not cooked, and stale cooked
+  files of them are not packed.
+- **What it records.** `CookModManifest.json` gains `pak_plan`, `bundled_folders`, `cooked_packages`,
+  `skipped_packages`; the pak step reads the plan from there, so a pak-only run packs what the cook planned.
+- **Off switch / fallbacks.** `DEPLOY_IGNORE_MOD_MARKER=1` ignores the markers for a run. Outside the editor, or in an
+  SDK without `modmarker`, nothing changes: one pak, everything in the folder. A marker tree that cannot be read
+  fails the cook instead of guessing.
+- **Mod registry note.** A registry release holds exactly one `.pak`, so a plan with several paks means each ships
+  separately.
+
+## Testing the multi-pak job and nested paks
+
+- Unit: `python3 -m unittest discover -s tests` (154 pass; `PakAsyncTests` is an older thread test that flakes about 1 in 25).
+  `tests/test_pak_groups.py` covers the multi-pak plan (nested merge, `OwnPak`, `_Content` mounts and collisions, per-pak size
+  splitting), `tests/test_markers.py` the marker preflight and excludes, `tests/test_cook_maps.py` the map plan.
+- Live, in the editor, on a collection with nested markers (one has `OwnPak`):
+  ```python
+  import deploy
+  deploy.start_many(['/Game/Mods/AgMods/MyCollection'], dest_dir='P:/.../Saved/MyPaks', do_cook=True, do_pak=True)
+  deploy.poll()   # until state is 'done' (or 'error' with the reason)
+  ```
+  Then read the `<stem>.txt` listing next to each pak: the root pak holds the nested folders, the `OwnPak` marker has its own
+  `<ModId>.pak`, `_Content` files sit at the game root, and only the first pak has `ModAssetRegistry.bin`. Compare with
+  `modmarker.plan(folder)['paks']` and the manifest's `pak_plan`. The pak stem is the marker's `ModId` (`mod.json` `name`
+  when pak-safe, else the folder name), so a mod whose `mod.json` name differs from its folder is renamed by V2.
 
 ## CLI (non-editor)
 

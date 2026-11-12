@@ -14,7 +14,14 @@
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
-	"Modules": [],
+	"Modules": [
+		{
+			"Name": "ArgonSDKToolingEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"WhitelistPlatforms": [ "Win64" ]
+		}
+	],
 	"Plugins": [
 		{ "Name": "PythonScriptPlugin", "Enabled": true }
 	]

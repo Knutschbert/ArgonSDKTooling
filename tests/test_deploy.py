@@ -437,6 +437,66 @@ class TickLoopTests(TempCase):
             deploy._cook.start_cook = saved_cook_start
             deploy.start_pak = saved_start_pak
 
+    def test_a_tick_during_start_cook_does_not_start_the_cook_twice(self):
+        """start_cook() can pump Slate (saving assets); the nested tick must not start a second job."""
+        started = []
+
+        def fake_start_cook(mod, up=None, ue=None, max_chunk=None):
+            started.append(mod)
+            deploy._tick()           # what the Slate pump does while start_cook is still running
+            return _ThreadCookJob(mod)
+
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None, validate=True, **kw):
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, mod + '.pak'), None)]
+
+        saved_cook_start, saved_start_pak = deploy._cook.start_cook, deploy.start_pak
+        deploy._cook.start_cook = fake_start_cook
+        deploy.start_pak = fake_start_pak
+        try:
+            self._setup_single_cook_pak()
+            ticks = 0
+            while deploy.poll()['state'] != 'done' and ticks < 100:
+                deploy._tick()
+                ticks += 1
+            self.assertEqual(started, ['M'])
+            self.assertEqual(len(deploy._RUNNING), 0)
+            self.assertTrue(deploy.poll()['success'])
+        finally:
+            deploy._cook.start_cook = saved_cook_start
+            deploy.start_pak = saved_start_pak
+
+    def test_the_pak_starts_with_the_full_mod_path_not_the_short_name(self):
+        """A mod outside AgMods (e.g. /Game/Mods/ArgonSDK) must reach the pak step by its real path."""
+        paked = []
+
+        class Job(object):
+            def poll(self_inner):
+                return {'success': True, 'mod': 'ArgonSDK', 'mod_dir': '/Game/Mods/ArgonSDK', 'cooked_dir': 'c', 'errors': [], 'chunks': 1}
+
+            def cancel(self_inner):
+                pass
+
+        def fake_start_pak(mod, dest_dir, up=None, ue=None, max_pak_size=None, validate=True, **kw):
+            paked.append(mod)
+            deploy._PAK_RUNNING[:] = []
+            deploy._PAK_RESULT[:] = [('ok', os.path.join(dest_dir, 'x.pak'), None)]
+
+        saved_cook_start, saved_start_pak = deploy._cook.start_cook, deploy.start_pak
+        deploy._cook.start_cook = lambda mod, up=None, ue=None, max_chunk=None: Job()
+        deploy.start_pak = fake_start_pak
+        try:
+            self._setup_single_cook_pak()
+            deploy._QUEUE[:] = ['/Game/Mods/ArgonSDK']
+            ticks = 0
+            while deploy.poll()['state'] != 'done' and ticks < 100:
+                deploy._tick()
+                ticks += 1
+            self.assertEqual(paked, ['/Game/Mods/ArgonSDK'])
+        finally:
+            deploy._cook.start_cook = saved_cook_start
+            deploy.start_pak = saved_start_pak
+
     def test_tick_emits_profile_phases(self):
         """The async tick path emits per-phase profile lines (run start + summary)."""
         logs = []

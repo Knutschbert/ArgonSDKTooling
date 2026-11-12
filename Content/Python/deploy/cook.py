@@ -22,12 +22,18 @@ import os
 import subprocess
 import time
 
-from deploy import engine, maps, provenance
+try:
+    import unreal
+except ImportError:  # CLI / unit-test environment
+    unreal = None
+
+from deploy import engine, maps, markers, provenance
 
 PROJECT_NAME = 'TBL'
 MOD_ROOT_DEFAULT = '/Game/Mods/AgMods/'
 MAX_PACKAGES_PER_RUN = 250
 BUILT_DATA_SUFFIX = '_BuiltData'  # <Map>_BuiltData.uasset sits beside <Map>.umap
+NATIVIZATION_SECTION = 'BlueprintNativizationSettings'
 
 # Step timing for one cook, collected on the orchestrating thread and printed
 # once when the cook finishes (avoids per-line print/flush lag). Records BOTH
@@ -95,6 +101,121 @@ def collect_packages(uproject, mod_dir):
     return [package for package, _is_map in scan_packages(uproject, mod_dir)]
 
 
+def discover_nativization_exclusions(mod_dir, bundled=(), unreal_module=None):
+    """Return UserDefinedStruct/UserDefinedEnum paths from all cooked folders.
+
+    The editor Asset Registry is the authoritative source for the asset class.
+    Never infer these from filenames: user-defined types may have arbitrary
+    names.  This helper deliberately fails closed when called outside an
+    editor, because silently missing an exclusion produces a successful but
+    unusable cook.
+    """
+    api = unreal_module or unreal
+    if api is None:
+        raise RuntimeError('cannot discover Blueprint nativization exclusions outside the Unreal editor')
+    exclusions = []
+    folders = [mod_dir] + [folder for folder in bundled if folder and folder != mod_dir]
+    for folder in folders:
+        try:
+            try:
+                assets = api.EditorAssetLibrary.list_assets(folder, recursive=True, include_folder=False)
+            except TypeError:
+                # UE4.25 has the older three-argument form.
+                assets = api.EditorAssetLibrary.list_assets(folder, recursive=True)
+        except Exception as error:
+            raise RuntimeError('Asset Registry discovery failed for {0}: {1}'.format(folder, error))
+
+        for asset_path in assets:
+            try:
+                data = api.EditorAssetLibrary.find_asset_data(asset_path)
+                class_name = str(data.asset_class)
+            except Exception:
+                # A stale registry entry is not a reason to guess. Continue so
+                # valid registry results remain useful; final PAK validation
+                # catches missing type assets.
+                continue
+            if class_name in ('UserDefinedStruct', 'UserDefinedEnum'):
+                package = str(asset_path).split('.', 1)[0].replace('\\', '/')
+                if package not in exclusions:
+                    exclusions.append(package)
+    return sorted(exclusions)
+
+
+def format_nativization_config(excluded_assets):
+    """Return the config fragment for one cook's nativization exclusions."""
+    lines = ['[{0}]'.format(NATIVIZATION_SECTION)]
+    lines.extend('+ExcludedAssets={0}'.format(path) for path in sorted(set(excluded_assets)))
+    return '\n'.join(lines) + '\n'
+
+
+def write_nativization_config(path, excluded_assets):
+    """Write a minimal per-cook editor config overlay."""
+    parent = os.path.dirname(path)
+    if parent and not os.path.isdir(parent):
+        os.makedirs(parent)
+    with open(path, 'w') as handle:
+        handle.write(format_nativization_config(excluded_assets))
+    return path
+
+
+def install_nativization_overlay(uproject, excluded_assets):
+    """Temporarily append exclusions to the project's DefaultEditor.ini.
+
+    Returns a restore token. The original file is restored byte-for-byte after
+    the last cook chunk, including the absent-file case. This is intentionally
+    project-local: UE4's commandlet config loader reads the same project config
+    hierarchy as the editor, whereas a bare -EditorIni override is not a
+    reliable merge mechanism in this UE4.25 branch.
+    """
+    if not excluded_assets:
+        return None
+    # The deploy state machine already serializes runs, but this guard also
+    # protects callers that invoke start_cook directly from two threads.
+    lock_path = os.path.join(os.path.dirname(uproject), 'Saved', '.deploy-nativization.lock')
+    if os.path.exists(lock_path):
+        raise RuntimeError('another cook already owns the Blueprint nativization config overlay')
+    config_dir = os.path.join(os.path.dirname(uproject), 'Config')
+    path = os.path.join(config_dir, 'DefaultEditor.ini')
+    existed = os.path.isfile(path)
+    original = None
+    if existed:
+        with open(path, 'rb') as handle:
+            original = handle.read()
+    if not os.path.isdir(config_dir):
+        os.makedirs(config_dir)
+    if not os.path.isdir(os.path.dirname(lock_path)):
+        os.makedirs(os.path.dirname(lock_path))
+    with open(lock_path, 'w') as handle:
+        handle.write('deploy nativization overlay\n')
+    try:
+        with open(path, 'ab') as handle:
+            if original and not original.endswith(b'\n'):
+                handle.write(b'\n')
+            handle.write(format_nativization_config(excluded_assets).encode('utf-8'))
+    except Exception:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
+        raise
+    return {'path': path, 'existed': existed, 'original': original, 'lock_path': lock_path}
+
+
+def restore_nativization_overlay(token):
+    """Restore a token returned by install_nativization_overlay."""
+    if not token:
+        return
+    path = token['path']
+    if token['existed']:
+        with open(path, 'wb') as handle:
+            handle.write(token['original'])
+    elif os.path.isfile(path):
+        os.remove(path)
+    lock_path = token.get('lock_path')
+    if lock_path and os.path.isfile(lock_path):
+        os.remove(lock_path)
+
+
 def select_packages(entries, required_maps=None):
     """Apply a map marker's plan to the folder's packages -> (packages to cook, skipped packages).
 
@@ -113,7 +234,7 @@ def select_packages(entries, required_maps=None):
     return sorted(keep), sorted(skipped)
 
 
-def plan_packages(uproject, mod_dir, plan=None):
+def plan_packages(uproject, mod_dir, plan=None, pak_plan=None):
     """The cook list for a mod folder, optionally narrowed by a map plan (see deploy.maps).
 
     Returns {'packages': [...], 'skipped': [...], 'external': [...], 'missing': [...]}:
@@ -123,7 +244,33 @@ def plan_packages(uproject, mod_dir, plan=None):
       another mod). Reported only: they are not listed for the cook, because this mod's pak cannot contain
       them and the cooker already follows references to outside content on its own
     - missing: required maps that exist nowhere (a stale marker entry)
+    - bundled: marker folders OUTSIDE `mod_dir` that a mod marker bundles into this mod's pak; their packages are
+      cooked too (their map markers and ExcludedPaths apply to them)
+    `pak_plan` (deploy.markers.preflight) adds the mod markers' ExcludedPaths and the bundled folders.
     """
+    result = _plan_map_packages(uproject, mod_dir, plan)
+    result['bundled'] = []
+    if pak_plan is None:
+        return result
+    excludes = markers.folder_excludes(pak_plan)
+    result['packages'], dropped = markers.apply_excludes(result['packages'], excludes)
+    result['skipped'] = sorted(set(result['skipped']) | set(dropped))
+    for folder in markers.bundled_folders(pak_plan, mod_dir):
+        try:
+            entries = scan_packages(uproject, folder)
+        except RuntimeError:
+            result['missing'].append(folder)
+            continue
+        folder_maps = maps.marker_plan(folder)
+        kept, skipped = select_packages(entries, set(folder_maps['maps']) if folder_maps is not None else None)
+        kept, dropped = markers.apply_excludes(kept, excludes)
+        result['packages'] = sorted(set(result['packages']) | set(kept))
+        result['skipped'] = sorted(set(result['skipped']) | set(skipped) | set(dropped))
+        result['bundled'].append(folder)
+    return result
+
+
+def _plan_map_packages(uproject, mod_dir, plan):
     entries = scan_packages(uproject, mod_dir)
     if plan is None:
         return {'packages': sorted(package for package, _m in entries), 'skipped': [], 'external': [], 'missing': []}
@@ -141,6 +288,14 @@ def plan_packages(uproject, mod_dir, plan=None):
         else:
             missing.append(package)
     return {'packages': packages, 'skipped': skipped, 'external': external, 'missing': missing}
+
+
+def sources_for(uproject, mod_dir, bundled=()):
+    """source_manifest of the mod folder plus every bundled marker folder (one sorted list)."""
+    entries = list(source_manifest(uproject, mod_dir))
+    for folder in bundled or ():
+        entries += source_manifest(uproject, folder)
+    return sorted(entries, key=lambda entry: entry['path'])
 
 
 def needs_clean_cook(previous_packages, new_packages, marker_active, has_output):
@@ -176,7 +331,8 @@ def source_manifest(uproject, mod_dir):
 
 # -- commandlet ----------------------------------------------------------------
 
-def cook_command(engine_root, uproject, packages, out_dir, log_path, iterate=True):
+def cook_command(engine_root, uproject, packages, out_dir, log_path, iterate=True,
+                 nativization_config=None):
     """The UE4Editor-Cmd.exe -run=Cook -cooksinglepackage command list.
 
     iterate=False omits -iterate, which makes the engine clear the output folder first.
@@ -214,13 +370,16 @@ class CookJob(object):
 
     def __init__(self, mod, uproject, engine_root, packages, out_dir, log_path, source_files,
                  max_chunk=MAX_PACKAGES_PER_RUN, mod_dir=None, _start=True,
-                 iterate=True, manifest_extra=None, plan_info=None):
+                 iterate=True, manifest_extra=None, plan_info=None,
+                 nativization_config=None, nativization_exclusions=None):
         self.mod, self.uproject, self.engine_root = mod, uproject, engine_root
         # iterate=False cleans the output folder, which only the FIRST chunk may do: a later chunk
         # would wipe the earlier chunks' output (all chunks share one OutputDir).
         self.iterate = iterate
         self.manifest_extra = manifest_extra
         self.plan_info = plan_info
+        self.nativization_config = nativization_config
+        self.nativization_exclusions = list(nativization_exclusions or [])
         self.packages = packages
         self.out_dir, self.log_path = out_dir, log_path
         self.source_files = source_files
@@ -254,7 +413,8 @@ class CookJob(object):
         try:
             self.process = subprocess.Popen(
                 cook_command(self.engine_root, self.uproject, self.chunks[self.index], self.out_dir, log_path,
-                             iterate=self.chunk_iterates(self.index)),
+                             iterate=self.chunk_iterates(self.index),
+                             nativization_config=self.nativization_config),
                 stdout=self._devnull, stderr=subprocess.STDOUT,
                 creationflags=engine.subprocess_flags())
         except Exception as error:
@@ -284,11 +444,22 @@ class CookJob(object):
             except Exception:
                 pass
         self._close_devnull()
+        self.cleanup_nativization_config()
+
+    def cleanup_nativization_config(self):
+        """Restore the project config after all chunks have stopped."""
+        if self.nativization_config:
+            try:
+                restore_nativization_overlay(self.nativization_config)
+            finally:
+                self.nativization_config = None
 
     def poll(self):
         if self.result is not None:
+            self.cleanup_nativization_config()
             return self.result
         if self.process is None:
+            self.cleanup_nativization_config()
             return self.result
         if self.process.poll() is None:
             return None
@@ -312,6 +483,7 @@ class CookJob(object):
             except Exception as error:
                 self.result['success'] = False
                 self.result['errors'].append('could not write cook provenance: {0}'.format(error))
+        self.cleanup_nativization_config()
         _dump_steps(self.mod)
         return self.result
 
@@ -323,7 +495,7 @@ class CookJob(object):
 
 # -- orchestration -------------------------------------------------------------
 
-def _log_plan(mod_dir, plan, selection, clean):
+def _log_plan(mod_dir, plan, selection, clean, pak_plan=None):
     """Say what the map marker changed about this cook (visible in the Output Log / console)."""
     if plan is not None:
         names = lambda packages: ', '.join(p.split('/')[-1] for p in packages)  # noqa: E731
@@ -343,13 +515,21 @@ def _log_plan(mod_dir, plan, selection, clean):
             print('[deploy] WARNING: the marker lists map(s) that do not exist: {0}'.format(names(selection['missing'])))
         if not plan['maps']:
             print('[deploy] WARNING: the map marker lists no maps, so no map in {0} will be cooked'.format(mod_dir))
+    if pak_plan is not None:
+        print('[deploy] mod markers: {0} marker(s) -> {1}'.format(
+            len(pak_plan['dirs']), '; '.join('{0}.pak{1} [{2}]'.format(
+                pak['stem'], ' (own pak)' if pak['separate'] else '', len(pak['markers'])) for pak in pak_plan['paks'])))
+        if selection.get('bundled'):
+            print('[deploy]   bundled from other directories: {0}'.format(', '.join(f.split('/')[-1] for f in selection['bundled'])))
+        for warning in pak_plan.get('warnings') or ():
+            print('[deploy] WARNING: ' + warning)
     if clean:
         print('[deploy] cooking {0} from scratch: the cook list shrank or the previous cook is unknown, '
               'so the engine clears the old output (no stale maps in the pak)'.format(mod_dir))
 
 
 def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN,
-               use_marker=True):
+               use_marker=True, nativization_exclusions=None, nativization_config=None):
     """Start cooking one mod folder in a separate UE4Editor-Cmd process. Returns a CookJob.
 
     use_marker=True (default) lets a map marker in the folder decide which maps are cooked (editor only,
@@ -365,11 +545,25 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     mod_dir = mod_package_dir(mod)
     _step('map_plan')
     plan = maps.marker_plan(mod_dir) if use_marker else None
+    _step('mod_markers')
+    pak_plan = markers.preflight(mod_dir) if use_marker else None
     _step('collect_packages')
-    selection = plan_packages(uproject, mod_dir, plan)
+    selection = plan_packages(uproject, mod_dir, plan, pak_plan)
     packages = selection['packages']
     _step('source_manifest')
-    source_files = source_manifest(uproject, mod_dir)
+    source_files = sources_for(uproject, mod_dir, selection['bundled'])
+    if nativization_exclusions is None:
+        _step('discover_nativization_exclusions')
+        try:
+            nativization_exclusions = discover_nativization_exclusions(mod_dir, selection['bundled'])
+        except RuntimeError as error:
+            raise RuntimeError('{0}; run this cook from the editor or pass --exclude-asset for each user-defined type'.format(error))
+    nativization_exclusions = sorted(set(nativization_exclusions))
+    if nativization_exclusions:
+        print('[deploy] excluding {0} user-defined type asset(s) from Blueprint nativization: {1}'.format(
+            len(nativization_exclusions), ', '.join(nativization_exclusions)))
+    if nativization_config is None and nativization_exclusions:
+        nativization_config = install_nativization_overlay(uproject, nativization_exclusions)
     if not packages:
         raise RuntimeError('No packages below {0}'.format(mod_dir))
     name = mod_dir.rstrip('/').split('/')[-1]
@@ -379,9 +573,9 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     previous = provenance.read_manifest(old_manifest) if os.path.isfile(old_manifest) else None
     if os.path.isfile(old_manifest):
         os.remove(old_manifest)
-    clean = needs_clean_cook((previous or {}).get('cooked_packages'), packages, plan is not None,
+    clean = needs_clean_cook((previous or {}).get('cooked_packages'), packages, plan is not None or pak_plan is not None,
                              os.path.isdir(os.path.join(out_dir, PROJECT_NAME)))
-    _log_plan(mod_dir, plan, selection, clean)
+    _log_plan(mod_dir, plan, selection, clean, pak_plan)
     log_path = os.path.join(saved, 'Logs', 'CookMod_{0}.log'.format(name))
     if not os.path.isdir(os.path.dirname(log_path)):
         os.makedirs(os.path.dirname(log_path))
@@ -393,13 +587,21 @@ def start_cook(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=M
     _step('spawn')
     return CookJob(name, uproject, engine_root, packages, out_dir, log_path, source_files,
                    max_chunk=max_chunk, mod_dir=mod_dir, iterate=not clean, plan_info=plan_info,
+                   nativization_config=nativization_config,
+                   nativization_exclusions=nativization_exclusions,
                    manifest_extra={'cooked_packages': packages, 'skipped_packages': selection['skipped'],
-                                   'map_markers': plan['markers'] if plan is not None else []})
+                                   'nativization_exclusions': nativization_exclusions,
+                                   'map_markers': plan['markers'] if plan is not None else [],
+                                   'bundled_folders': selection['bundled'],
+                                   'pak_plan': markers.manifest_plan(pak_plan) if pak_plan is not None else None})
 
 
-def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN):
+def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=MAX_PACKAGES_PER_RUN,
+             nativization_exclusions=None, nativization_config=None):
     """Cook one mod folder and wait. Returns the result dict."""
-    result = start_cook(mod, uproject_path, ue4_root, out_dir, max_chunk=max_chunk).wait()
+    result = start_cook(mod, uproject_path, ue4_root, out_dir, max_chunk=max_chunk,
+                        nativization_exclusions=nativization_exclusions,
+                        nativization_config=nativization_config).wait()
     print('cook {0}: {1} ({2} packages, {3} s) -> {4}'.format(
         result['mod'], 'OK' if result['success'] else 'FAILED',
         result['packages'], result['seconds'], result['cooked_dir']))

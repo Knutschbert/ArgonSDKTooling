@@ -24,7 +24,7 @@ import subprocess
 import time
 from collections import OrderedDict
 
-from deploy import engine, provenance, unrealpak
+from deploy import engine, markers, provenance, unrealpak
 
 PROJECT_NAME = 'TBL'
 
@@ -142,6 +142,127 @@ def _build_entries(cooked_dir, mod_dir):
             entries.append((source, target, size))
     entries.sort(key=lambda entry: entry[1])
     return entries
+
+
+# -- marker plan: one entry list per planned pak -----------------------------
+
+def _content_root(cooked_dir, mod_dir):
+    """'<out>/TBL/Content' given the cooked mod folder '<out>/TBL/Content/<mod rel>' and its /Game path."""
+    rel = os.path.normpath(mod_dir[len('/Game/'):].strip('/').replace('/', os.sep))
+    norm = os.path.normpath(cooked_dir)
+    if not norm.endswith(os.sep + rel) and norm != rel:
+        raise RuntimeError('cooked folder {0} does not match mod folder {1}'.format(cooked_dir, mod_dir))
+    return norm[:-len(rel)].rstrip(os.sep)
+
+
+def _cooked_folder(content_root, folder):
+    return os.path.join(content_root, folder[len('/Game/'):].replace('/', os.sep))
+
+
+def entries_for_tree(content_root, tree_folder, content_parents, skip_folders, excludes, skip_registry_at=None):
+    """[(source, target, size, from_content)] for every cooked file below one folder of the marker plan.
+
+    Real-path files mount at ../../../TBL/Content/<path from the content root>. Files below ANY `_Content` folder
+    in the tree (a marker's own, or one in a plain subfolder such as Mods/ModLoading/_Content) mount at the game
+    root instead (content replacement), with the path below that `_Content` folder. `content_parents` is kept for
+    compatibility and no longer needed. Files in a folder of `skip_folders` (another pak's marker) and files excluded by a
+    marker's ExcludedPaths are left out. `skip_registry_at` is a folder whose top-level AssetRegistry.bin is skipped.
+    """
+    destination = '../../../{0}/Content'.format(PROJECT_NAME)
+    base = _cooked_folder(content_root, tree_folder)
+    skip_prefixes = [_cooked_folder(content_root, f) + os.sep for f in skip_folders]
+    entries = []
+    for root, _dirs, files in os.walk(base):
+        for name in files:
+            source = os.path.join(root, name)
+            if any((root + os.sep).startswith(prefix) for prefix in skip_prefixes):
+                continue
+            if skip_registry_at and root == os.path.normpath(_cooked_folder(content_root, skip_registry_at)) and name == 'AssetRegistry.bin':
+                continue
+            rel_dir = os.path.relpath(root, content_root).replace(os.sep, '/')
+            package = '/Game/' + rel_dir + '/' + os.path.splitext(name)[0]
+            if markers.apply_excludes([package], excludes)[1]:
+                continue
+            from_content = False
+            target = None
+            parts = rel_dir.split('/')
+            if '_Content' in parts:
+                inner = '/'.join(parts[parts.index('_Content') + 1:])
+                target = '{0}/{1}/{2}'.format(destination, inner, name) if inner else '{0}/{1}'.format(destination, name)
+                from_content = True
+            if target is None:
+                target = '{0}/{1}/{2}'.format(destination, rel_dir, name)
+            try:
+                size = os.path.getsize(source)
+            except OSError:
+                size = 0
+            entries.append((source, target, size, from_content))
+    return entries
+
+
+def dedupe_entries(entries):
+    """Drop duplicate targets, keeping the `_Content` (content replacement) file over a real-path one."""
+    chosen = {}
+    for entry in entries:
+        current = chosen.get(entry[1])
+        if current is None or (entry[3] and not current[3]):
+            chosen[entry[1]] = entry
+    return sorted(((e[0], e[1], e[2]) for e in chosen.values()), key=lambda e: e[1])
+
+
+def build_pak_groups(cooked_dir, mod_dir, pak_plan, registry_source=None):
+    """[(pak stem, entries)] for every pak of a marker plan (deploy.markers.preflight / the cook manifest).
+
+    A pak holds its root marker's cooked folder minus the folders of markers that have their own pak
+    (OwnPak), plus the cooked folders of bundled markers from other directories under their own real paths.
+    `registry_source`, a staged ModAssetRegistry.bin, goes into the first pak.
+    """
+    content_root = _content_root(cooked_dir, mod_dir)
+    dirs = pak_plan['dirs']
+    excludes = markers.folder_excludes(pak_plan)
+    own_roots = [p['root'] for p in pak_plan['paks'] if p['separate']]
+    groups = []
+    for index, pak in enumerate(pak_plan['paks']):
+        root_folder = dirs[pak['root']]
+        member_folders = sorted(set(dirs[m] for m in pak['markers']))
+        skip = [dirs[r] for r in own_roots if r != pak['root']]
+        trees = [root_folder] + [f for f in member_folders if f != root_folder and not f.startswith(root_folder + '/')]
+        entries = []
+        for tree in trees:
+            entries += entries_for_tree(content_root, tree, member_folders + [mod_dir.rstrip('/')], skip, excludes,
+                                        skip_registry_at=mod_dir.rstrip('/'))
+        if index == 0 and registry_source and os.path.isfile(registry_source):
+            target = '../../../{0}/Content/{1}/ModAssetRegistry.bin'.format(PROJECT_NAME, mod_dir[len('/Game/'):].strip('/'))
+            entries.append((registry_source, target, os.path.getsize(registry_source), False))
+        groups.append((pak['stem'], dedupe_entries(entries)))
+    return groups
+
+
+def plan_parts(result, mod_dir, max_pak_size=None, registry_source=None):
+    """([entry lists], [pak stems], all entries): what PakJob / pak_mod publish.
+
+    Without a marker plan (result['pak_plan']) this is the single legacy pak '<mod>' (split by size when asked);
+    with one, every planned pak, each split by size on its own as '<stem>_partN'.
+    """
+    threshold = parse_size(max_pak_size) if max_pak_size else None
+    if result.get('pak_plan'):
+        groups = build_pak_groups(result['cooked_dir'], mod_dir, result['pak_plan'], registry_source)
+    else:
+        groups = [(result['mod'], _build_entries(result['cooked_dir'], mod_dir))]
+    parts, stems, everything = [], [], []
+    for stem, entries in groups:
+        if not entries:
+            raise RuntimeError('no cooked files were found for {0}.pak below {1}'.format(stem, result['cooked_dir']))
+        everything += entries
+        if threshold is not None and sum(e[2] for e in entries) > threshold:
+            pieces = _partition_entries(entries, threshold)
+            for number, piece in enumerate(pieces, start=1):
+                parts.append(piece)
+                stems.append('{0}_part{1}'.format(stem, number) if len(pieces) > 1 else stem)
+        else:
+            parts.append(entries)
+            stems.append(stem)
+    return parts, stems, everything
 
 
 def _runtime_registry_path(cooked_dir, mod_dir):
@@ -269,25 +390,13 @@ def pak_mod(result, dest_dir, ue4_root=None, compress=True, max_pak_size=None, r
             _step('stage_asset_registry')
             staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
         _step('build_entries')
-        entries = _build_entries(result['cooked_dir'], mod_dir)
-        _step('parse_partition')
-        if not entries:
-            raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
-        _step('partition_total')
-
-        total_size = sum(e[2] for e in entries)
-        threshold = parse_size(max_pak_size) if max_pak_size else None
-        _step('partition_plan')
-        if threshold is not None and total_size > threshold:
-            parts = _partition_entries(entries, threshold)
-        else:
-            parts = [entries]
+        parts, stems, entries = plan_parts(result, mod_dir, max_pak_size, staged_registry)
         multi = len(parts) > 1
         _step('discover_unrealpak')
         unrealpak_run = unrealpak.discover_unrealpak(engine_root=engine_root)
         token = '{0}.{1}.{2}'.format(result['mod'], os.getpid(), int(time.time() * 1000))
         for idx, part in enumerate(parts, start=1):
-            stem = '{0}_part{1}'.format(result['mod'], idx) if multi else result['mod']
+            stem = stems[idx - 1]
             suffix = '_' + str(idx)
             filelist = os.path.join(dest_dir, '.filelist_{0}{1}.txt'.format(token, suffix))
             temp_pak = os.path.join(dest_dir, '.{0}{1}.pak.tmp'.format(token, suffix))
@@ -370,14 +479,7 @@ class PakJob(object):
                 _step('stage_asset_registry')
                 self.staged_registry = _stage_mod_asset_registry(result['cooked_dir'], mod_dir)
             _step('build_entries')
-            entries = _build_entries(result['cooked_dir'], mod_dir)
-            if not entries:
-                raise RuntimeError('no cooked files were found below {0}'.format(result['cooked_dir']))
-            threshold = parse_size(max_pak_size) if max_pak_size else None
-            if threshold is not None and sum(e[2] for e in entries) > threshold:
-                self.parts = _partition_entries(entries, threshold)
-            else:
-                self.parts = [entries]
+            self.parts, self.stems, entries = plan_parts(result, mod_dir, max_pak_size, self.staged_registry)
             self.entries = entries
             self.multi = len(self.parts) > 1
             _step('discover_unrealpak')
@@ -393,7 +495,7 @@ class PakJob(object):
         idx = self.index + 1
         mod = self.result['mod']
         part = self.parts[self.index]
-        stem = '{0}_part{1}'.format(mod, idx) if self.multi else mod
+        stem = self.stems[self.index]
         suffix = '_' + str(idx)
         self._filelist = os.path.join(self.dest_dir, '.filelist_{0}{1}.txt'.format(self.token, suffix))
         self._temp_pak = os.path.join(self.dest_dir, '.{0}{1}.pak.tmp'.format(self.token, suffix))

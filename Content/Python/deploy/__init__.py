@@ -31,9 +31,11 @@ from . import pak as _pak        # noqa: E402
 
 # -- public blocking helpers ---------------------------------------------------
 
-def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN):
+def cook_mod(mod, uproject_path=None, ue4_root=None, out_dir=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN,
+             nativization_exclusions=None):
     """Cook one mod folder and wait. Returns the result dict (deploy.cook_mod)."""
-    return _cook.cook_mod(mod, uproject_path, ue4_root, out_dir, max_chunk=max_chunk)
+    return _cook.cook_mod(mod, uproject_path, ue4_root, out_dir, max_chunk=max_chunk,
+                          nativization_exclusions=nativization_exclusions)
 
 
 def cook_and_pak(mod, dest_dir, uproject_path=None, ue4_root=None, max_chunk=_cook.MAX_PACKAGES_PER_RUN):
@@ -196,7 +198,23 @@ def _finish_op(success, error=None, result=None):
     _OP['error'] = error
 
 
+_IN_TICK = []
+
+
 def _tick(_delta=0.0):
+    """Slate post-tick callback. Not re-entrant: start_cook() can save assets (version stamping), and saving pumps
+    Slate, which ticks again BEFORE the first job is registered - that started the same cook twice and then a second
+    pak ('a pak is already running'). A nested tick does nothing; the outer one carries on."""
+    if _IN_TICK:
+        return
+    _IN_TICK.append(True)
+    try:
+        _tick_body()
+    finally:
+        del _IN_TICK[:]
+
+
+def _tick_body():
     # -- a cook is in flight --
     if _RUNNING:
         job, pak_wanted = _RUNNING[0]
@@ -212,14 +230,16 @@ def _tick(_delta=0.0):
         _RUNNING.pop(0)
         _log('cook {0}: {1}'.format(result.get('mod'), 'OK' if result.get('success') else 'FAILED'),
              not result.get('success'))
-        _prof_phase(result.get('mod'), 'cook_end', 'done' if result.get('success') else 'failed')
+        _prof_phase(result.get('mod_dir') or result.get('mod'), 'cook_end', 'done' if result.get('success') else 'failed')
         if not result.get('success'):
             for line in (result.get('errors') or [])[:5]:
                 _log('  ' + line[:200], True)
             _finish_op(success=False, error='; '.join(result.get('errors') or []))
             return
         if pak_wanted:
-            _start_async_pak(result['mod'], _CTX['dest'], _CTX['eng'], _CTX['upr'])
+            # the full /Game/... path, not the short name: the pak step derives the mod's real root (registry mount, cooked
+            # folder) from it, and a short name falls back to /Game/Mods/AgMods/<name>
+            _start_async_pak(result.get('mod_dir') or result['mod'], _CTX['dest'], _CTX['eng'], _CTX['upr'])
             return
         _finish_op(success=True, result=result.get('cooked_dir'))
         return
@@ -418,12 +438,14 @@ def _pak_prepare(mod, dest_dir, uproject_path, validate=True, log=_log):
     manifest = os.path.join(cooked_root, 'CookModManifest.json')
     if validate:
         _pak._step('source_manifest')
-        sources = _cook.source_manifest(uproject, mod_dir)
+        recorded = provenance.read_manifest(manifest) or {}
+        sources = _cook.sources_for(uproject, mod_dir, recorded.get('bundled_folders') or [])
         _pak._step('validate')
         provenance.validate_cooked_output(cooked, manifest, name, sources)
         _pak._step('validated_log')
         log('cook provenance validated: {0}'.format(manifest))
-    return {'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked}
+    recorded = provenance.read_manifest(manifest) or {}
+    return {'success': True, 'mod': name, 'mod_dir': mod_dir, 'cooked_dir': cooked, 'pak_plan': recorded.get('pak_plan')}
 
 
 def _pak_cooked(mod, _deprecated, dest_dir, uproject_path, engine_dir, max_pak_size=None, log=_log, validate=True, run_list=False):
@@ -550,6 +572,8 @@ def _main(argv=None):
     p.add_argument('--dest', help='pak destination dir (cook then pak)')
     p.add_argument('--max-chunk', type=int, default=_cook.MAX_PACKAGES_PER_RUN)
     p.add_argument('--max-pak-size', help='split the pak if it exceeds this size, e.g. 200MB')
+    p.add_argument('--exclude-asset', action='append', default=[],
+                   help='explicit UserDefinedStruct/UserDefinedEnum package to exclude from nativization (CLI fallback)')
     p.add_argument('--dry-run', action='store_true', help='print commands without running')
     p.add_argument('--uproject'); p.add_argument('--engine')
 
@@ -584,7 +608,8 @@ def _cli_cook(args):
             ok = _dry_cook(mod, args) and ok
             continue
         result = _cook.cook_mod(mod, args.uproject, args.engine,
-                                out_dir=args.out, max_chunk=args.max_chunk)
+                                out_dir=args.out, max_chunk=args.max_chunk,
+                                nativization_exclusions=args.exclude_asset or None)
         if not result['success']:
             ok = False
             continue

@@ -14,7 +14,7 @@ _CONTENT_PYTHON = os.path.abspath(os.path.join(_HERE, '..', 'Content', 'Python')
 if _CONTENT_PYTHON not in sys.path:
     sys.path.insert(0, _CONTENT_PYTHON)
 
-from deploy import cook, engine, maps, provenance  # noqa: E402
+from deploy import cook, engine, maps, markers, provenance  # noqa: E402
 
 M = '/Game/Mods/AgMods/Mod/'
 
@@ -187,6 +187,64 @@ class MarkerPlanTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             maps.marker_plan('/Game/X')
         self.assertIn('bad property', str(ctx.exception))
+
+
+class PlanPackagesWithMarkersTests(TempCase):
+    """ExcludedPaths and bundled marker folders from the mod markers' pak plan."""
+
+    def _project(self):
+        for rel in ('Mod/Marker.uasset', 'Mod/Keep.uasset', 'Mod/Old/A.uasset', 'Mod/Maps/Town_bak.uasset', 'Mod/Sub/Marker.uasset',
+                    'Mod/Sub/Skipme.uasset', 'Ext/Marker.uasset', 'Ext/Data.uasset', 'Ext/Data_bak.uasset', 'Ext/Town.umap', 'Ext/Other.umap'):
+            self._touch('Content/Mods/AgMods/' + rel)
+        return self._path('TBL.uproject')
+
+    PLAN = {'dirs': {'/Game/Mods/AgMods/Mod/Marker': '/Game/Mods/AgMods/Mod', '/Game/Mods/AgMods/Mod/Sub/Marker': '/Game/Mods/AgMods/Mod/Sub',
+                     '/Game/Mods/AgMods/Ext/Marker': '/Game/Mods/AgMods/Ext'},
+            'excluded': {'/Game/Mods/AgMods/Mod/Marker': ['Old/', '*_bak'], '/Game/Mods/AgMods/Mod/Sub/Marker': ['Skipme'],
+                         '/Game/Mods/AgMods/Ext/Marker': ['*_bak']},
+            'paks': []}
+
+    def test_excludes_apply_per_marker_folder(self):
+        sel = cook.plan_packages(self._project(), '/Game/Mods/AgMods/Mod', None, {
+            'dirs': self.PLAN['dirs'], 'excluded': self.PLAN['excluded'], 'paks': []})
+        self.assertNotIn('/Game/Mods/AgMods/Mod/Old/A', sel['packages'])
+        self.assertNotIn('/Game/Mods/AgMods/Mod/Maps/Town_bak', sel['packages'])
+        self.assertNotIn('/Game/Mods/AgMods/Mod/Sub/Skipme', sel['packages'])
+        self.assertIn('/Game/Mods/AgMods/Mod/Keep', sel['packages'])
+        self.assertIn('/Game/Mods/AgMods/Mod/Sub/Marker', sel['packages'])
+        self.assertEqual(len(sel['skipped']), 4)  # Old/A, Town_bak, Skipme + the bundled Ext/Data_bak
+
+    def test_bundled_folder_outside_the_mod_is_cooked_with_its_own_excludes(self):
+        sel = cook.plan_packages(self._project(), '/Game/Mods/AgMods/Mod', None, self.PLAN)
+        self.assertEqual(sel['bundled'], ['/Game/Mods/AgMods/Ext'])
+        self.assertIn('/Game/Mods/AgMods/Ext/Data', sel['packages'])
+        self.assertIn('/Game/Mods/AgMods/Ext/Town', sel['packages'])
+        self.assertNotIn('/Game/Mods/AgMods/Ext/Data_bak', sel['packages'])
+
+    def test_a_missing_bundled_folder_is_reported_not_fatal(self):
+        plan = {'dirs': dict(self.PLAN['dirs'], **{'/Game/Mods/AgMods/Gone/Marker': '/Game/Mods/AgMods/Gone'}),
+                'excluded': {}, 'paks': []}
+        sel = cook.plan_packages(self._project(), '/Game/Mods/AgMods/Mod', None, plan)
+        self.assertIn('/Game/Mods/AgMods/Gone', sel['missing'])
+
+    def test_without_a_pak_plan_nothing_changes(self):
+        sel = cook.plan_packages(self._project(), '/Game/Mods/AgMods/Mod', None, None)
+        self.assertEqual((sel['skipped'], sel['bundled']), ([], []))
+        self.assertIn('/Game/Mods/AgMods/Mod/Old/A', sel['packages'])
+
+    def test_sources_cover_bundled_folders(self):
+        up = self._project()
+        entries = cook.sources_for(up, '/Game/Mods/AgMods/Mod', ['/Game/Mods/AgMods/Ext'])
+        paths = [e['path'] for e in entries]
+        self.assertIn('Mods/AgMods/Ext/Data.uasset', paths)
+        self.assertIn('Mods/AgMods/Mod/Keep.uasset', paths)
+        self.assertEqual(paths, sorted(paths))
+
+    def test_manifest_plan_is_json_safe(self):
+        import json
+        out = markers.manifest_plan(self.PLAN)
+        json.dumps(out)
+        self.assertEqual(out['dirs'], self.PLAN['dirs'])
 
 
 if __name__ == '__main__':

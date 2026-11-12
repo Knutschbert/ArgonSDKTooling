@@ -69,6 +69,65 @@ class PackagePathTests(TempCase):
         self.assertEqual([e['size'] for e in entries], [1, 2])
         self.assertIn('mtime', entries[0])
 
+    def test_discovery_requires_editor(self):
+        with self.assertRaises(RuntimeError):
+            cook.discover_nativization_exclusions('/Game/Mods/AgMods/MyMod', unreal_module=None)
+
+    def test_discovery_finds_user_types(self):
+        class Data(object):
+            def __init__(self, asset_class):
+                self.asset_class = asset_class
+
+        class Library(object):
+            @staticmethod
+            def list_assets(_root, recursive=True, include_folder=False):
+                return ['/Game/Mods/AgMods/MyMod/ZEnum.ZEnum',
+                        '/Game/Mods/AgMods/MyMod/AStruct.AStruct',
+                        '/Game/Mods/AgMods/MyMod/BP.BP']
+
+            @staticmethod
+            def find_asset_data(path):
+                return Data('UserDefinedEnum' if 'Enum' in path else
+                            'UserDefinedStruct' if 'Struct' in path else 'Blueprint')
+
+        class FakeUnreal(object):
+            EditorAssetLibrary = Library
+
+        self.assertEqual(
+            cook.discover_nativization_exclusions('/Game/Mods/AgMods/MyMod', unreal_module=FakeUnreal),
+            ['/Game/Mods/AgMods/MyMod/AStruct', '/Game/Mods/AgMods/MyMod/ZEnum'])
+
+    def test_discovery_scans_bundled_folders_once_and_deduplicates(self):
+        class Data(object):
+            def __init__(self, asset_class):
+                self.asset_class = asset_class
+
+        class Library(object):
+            calls = []
+
+            @staticmethod
+            def list_assets(root, recursive=True, include_folder=False):
+                Library.calls.append(root)
+                return [root + '/Shared.Shared', root + '/Only.Only']
+
+            @staticmethod
+            def find_asset_data(path):
+                return Data('UserDefinedStruct' if path.endswith('Shared.Shared') else 'UserDefinedEnum')
+
+        class FakeUnreal(object):
+            EditorAssetLibrary = Library
+
+        result = cook.discover_nativization_exclusions(
+            '/Game/Mods/AgMods/MyMod',
+            ['/Game/Mods/AgMods/Bundled', '/Game/Mods/AgMods/MyMod'],
+            FakeUnreal)
+        self.assertEqual(Library.calls, ['/Game/Mods/AgMods/MyMod', '/Game/Mods/AgMods/Bundled'])
+        self.assertEqual(result, [
+            '/Game/Mods/AgMods/Bundled/Only',
+            '/Game/Mods/AgMods/Bundled/Shared',
+            '/Game/Mods/AgMods/MyMod/Only',
+            '/Game/Mods/AgMods/MyMod/Shared'])
+
 
 class CommandTests(TempCase):
     def test_cook_command_shape(self):
@@ -84,6 +143,42 @@ class CommandTests(TempCase):
         self.assertIn(joined, cmd)
         self.assertIn('-cooksinglepackage', cmd)
         self.assertIn('-OutputDir=' + self._path('out'), cmd)
+
+    def test_cook_command_does_not_replace_editor_config(self):
+        cmd = cook.cook_command(self._path('engine'), self._path('TBL.uproject'),
+                                ['/Game/A'], self._path('out'), self._path('x.log'),
+                                nativization_config=self._path('exclude.ini'))
+        self.assertNotIn('-EditorIni=' + self._path('exclude.ini'), cmd)
+
+    def test_nativization_config_format_is_deterministic(self):
+        self.assertEqual(
+            cook.format_nativization_config(['/Game/Z', '/Game/A', '/Game/Z']),
+            '[BlueprintNativizationSettings]\n'
+            '+ExcludedAssets=/Game/A\n'
+            '+ExcludedAssets=/Game/Z\n')
+
+    def test_write_nativization_config(self):
+        path = cook.write_nativization_config(self._path('Saved', 'exclude.ini'), ['/Game/A'])
+        with open(path) as handle:
+            self.assertEqual(handle.read(), '[BlueprintNativizationSettings]\n+ExcludedAssets=/Game/A\n')
+
+    def test_overlay_restores_existing_editor_config(self):
+        up = self._path('TBL.uproject')
+        config = self._write('Config/DefaultEditor.ini', '[Existing]\nKey=Value\n')
+        token = cook.install_nativization_overlay(up, ['/Game/A', '/Game/B'])
+        with open(config, 'rb') as handle:
+            self.assertIn(b'[Existing]', handle.read())
+        cook.restore_nativization_overlay(token)
+        with open(config, 'rb') as handle:
+            self.assertEqual(handle.read(), b'[Existing]\nKey=Value\n')
+
+    def test_overlay_removes_new_config(self):
+        up = self._path('TBL.uproject')
+        token = cook.install_nativization_overlay(up, ['/Game/A'])
+        self.assertTrue(os.path.isfile(token['path']))
+        cook.restore_nativization_overlay(token)
+        self.assertFalse(os.path.exists(token['path']))
+        self.assertFalse(os.path.exists(os.path.join(self._dir, 'Saved', '.deploy-nativization.lock')))
 
 
 class JudgeTests(TempCase):
