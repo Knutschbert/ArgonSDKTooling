@@ -2,7 +2,7 @@
 
 Shared, **portable** cook/pak and mod-pack tooling for the Chivalry 2 SDK.
 This is a UE **plugin** (`ArgonSDKTooling`) so a single copy of the **code**
-serves **both** SDK projects (the widgets move in here too under vje.9; see
+serves **both** SDK projects (the editor widgets live here too, in
 `Content/Scripts/ModHandling/`):
 
 - `ArgonSDK` — UE 4.25 (Launcher engine, `EngineAssociation: "4.25"`)
@@ -23,6 +23,68 @@ python deploy.py sync-tooling
 > `sync-tooling` needs a source: pass `--src <dir|git-url>`, or set
 > `DEPLOY_TOOLING_REPO` / `tooling_repo` in `deploy.local.json`, or install the
 > plugin as a git clone. Without one it exits with a "no source" error.
+
+## Project setup (ini config, one-time per SDK)
+
+Enabling the plugin is not enough — two project config files need entries before
+the marker workflow and the cook behave correctly. Paths below assume the stock
+`Content/Mods/ArgonSDK/Mods/ModLoading` layout.
+
+### 1. Load the marker scripts — `Config/DefaultEngine.ini`
+
+The map/mod marker right-click and toolbar actions come from the SDK's
+`ModLoading/Python` scripts; they only register if the editor runs them at
+startup. Under `[/Script/PythonScriptPlugin.PythonScriptPluginSettings]`:
+
+```ini
++AdditionalPaths=(Path="../../../TBL/Content/Python")
++AdditionalPaths=(Path="../../../TBL/Content/Mods/ArgonSDK/Mods/ModLoading/Python")
++StartupScripts=import sys, unreal; p = unreal.Paths.project_content_dir() + 'Mods/ArgonSDK/Mods/ModLoading/Python'; sys.path.append(p) if p not in sys.path else None; import mapmarker_menu; mapmarker_menu.register()
+bDeveloperMode=True
+```
+
+- **`DefaultEngine.ini` is UTF-16 (with a BOM).** Edit it as UTF-16, or Unreal
+  silently ignores your changes.
+- The **`+StartupScripts` line is what actually registers the menus**: it appends
+  the scripts folder to `sys.path` via `project_content_dir()` and calls
+  `mapmarker_menu.register()`. `+AdditionalPaths` on its own is **not** enough —
+  those are resolved relative to `Binaries/Win64` and do not reach the content
+  folder here, so the explicit `sys.path` append is required.
+- Restart the editor after changing this.
+
+> The `Unchained` SDK already has these lines; the clean `ArgonSDK` checkout does
+> not yet — add them there when you wire the marker scripts in.
+
+### 2. Keep Blueprint structs/enums shippable — `Config/DefaultGame.ini`
+
+The V2 map marker stores its rows in a Blueprint struct (`F_ShippedMap`) and enum
+(`E_MapShipState`). The base project packages with **exclusive** Blueprint
+nativization:
+
+```ini
+[/Script/UnrealEd.ProjectPackagingSettings]
+BlueprintNativizationMethod=Exclusive
+```
+
+Under nativization, a converted type becomes generated C++ with **no shipped
+`.uasset`**. In UE 4.25 that can pull a mod's user-defined structs/enums into
+nativization and drop their assets from the pak, even though the mod's Blueprints
+still import them — so the mod fails to load. Leave this value as the base game
+sets it (`Exclusive`); the cooker then **auto-detects the user structs/enums a mod
+uses and excludes them from nativization** for that cook, so they ship as assets
+(recorded in the manifest's `nativization_exclusions`). No per-mod config is
+needed in the editor. In the CLI/headless path the editor Asset Registry is
+unavailable, so pass them explicitly or the cook fails closed:
+
+```bash
+python deploy.py cook <mod> --exclude-asset /Game/.../F_ShippedMap --exclude-asset /Game/.../E_MapShipState
+```
+
+### Optional — docked widget
+
+A docked Mod Packer widget and Content Browser favorites can be shipped via
+`Config/DefaultEditorPerProjectUserSettings.ini` (`LoadedUIs` / `FavoritePaths`).
+This is convenience only; the tooling works without it.
 
 ## Editor usage (in the widget)
 
@@ -138,7 +200,7 @@ SDK's `modmarker` module reads the markers from the Asset Registry, nothing is l
 
 ## Testing the multi-pak job and nested paks
 
-- Unit: `python3 -m unittest discover -s tests` (154 pass; `PakAsyncTests` is an older thread test that flakes about 1 in 25).
+- Unit: `python3 -m unittest discover -s tests` (164 pass; `PakAsyncTests` is an older thread test that flakes about 1 in 25).
   `tests/test_pak_groups.py` covers the multi-pak plan (nested merge, `OwnPak`, `_Content` mounts and collisions, per-pak size
   splitting), `tests/test_markers.py` the marker preflight and excludes, `tests/test_cook_maps.py` the map plan.
 - Live, in the editor, on a collection with nested markers (one has `OwnPak`):
@@ -192,7 +254,7 @@ Content/
     deploy/               # module package; `import deploy` = THIS (the API)
     modtools.py           # editor-only: mod / marker creation helpers
   Scripts/
-    ModHandling/          # widget home (stock .uasset added in vje.9; dir currently README-only)
+    ModHandling/          # widget home: Mod Packer widgets (.uasset) + icons
     _Local/               # user customizations (git-ignored, never overwritten)
 ```
 Git-ignored per-user `deploy.local.json` (next to the plugin root or CWD) +
