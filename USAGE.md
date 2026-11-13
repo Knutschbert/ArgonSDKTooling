@@ -1,7 +1,7 @@
 # Packaging Mods with the Mod Packer Widget
 
 The **Mod Packer** is an in-editor widget shipped with ArgonSDK. It is the one place to
-turn a mod folder into a shippable Chivalry 2 Unchained `.pak` — it creates mods and their
+turn a mod folder into a shippable Chivalry 2 Unchained `.pak`: it creates mods and their
 markers, cooks, and packages them, one at a time or in batches, **without touching Python
 or hardcoding any engine/SDK paths**.
 
@@ -9,8 +9,8 @@ What you get:
 
 - **Create** a new mod folder, its mod marker, and (optionally) a map marker and mod actor in one click.
 - **Cook** and **package** a single mod or a selection of mods, with simple mouse-modifier shortcuts.
-- **Markers** that let the Unchained loader discover your mod — and its maps and loading
-  screens — quickly in-game.
+- **Markers** that let the Unchained loader discover your mod (and its maps and loading
+  screens) quickly in-game.
 
 > [!NOTE]
 > This guide covers the **widget workflow**. For the packaging commands, the CLI, and project
@@ -22,7 +22,7 @@ What you get:
 
 - ArgonSDK is set up so the widget is **docked and visible** on startup.
 - The latest SDK supplies the ArgonSDKTooling plugin, the Unchained-Mods submodule, and the
-  required `.ini` tweaks. It ships with several community mods embedded as submodules — if the
+  required `.ini` tweaks. It ships with several community mods embedded as submodules. If the
   list is empty, click **`Refresh`**.
 - Set the **output** field to the game's `Paks` directory, or keep the default.
 
@@ -44,7 +44,7 @@ Browser) and tick **Show Plugin Content**.
 <details>
 <summary><b>Can't update your SDK from git? Manual setup</b></summary>
 
-Enabling the plugin alone is not enough — the marker menus and the cook behaviour need a couple
+Enabling the plugin alone is not enough: the marker menus and the cook behaviour need a couple
 of project config entries. The full, authoritative steps (which `.ini` files, which lines) are in
 the tooling README's [Project setup](./README.md#project-setup-ini-config-one-time-per-sdk) section.
 
@@ -65,7 +65,7 @@ It's recommended to create new mods with the widget's **`New`** button rather th
 | Option | What it does |
 |---|---|
 | **`Mod Name`** | Name of the new mod; becomes its subfolder and its `ModId`. |
-| **`Add Map Marker`** | Also creates a map marker — tick this if the mod will ship maps. |
+| **`Add Map Marker`** | Also creates a map marker; tick this if the mod will ship maps. |
 | **`Add Mod Actor`** | Creates an `ArgonSDKModBase` asset and registers it in the mod marker (as a `ModActorClasses` entry). |
 | **`Create`** | Creates the subdirectory and a mod marker (`DA_ModMarker_V2`). |
 
@@ -85,7 +85,7 @@ in the class picker.
 
 ## Cooking & packaging a single mod
 
-The widget cooks and packages individual mods — you don't need the editor's **Cook for Windows**.
+The widget cooks and packages individual mods, so you don't need the editor's **Cook for Windows**.
 Use your mouse with modifier keys on a mod entry:
 
 | Input | Action |
@@ -121,8 +121,8 @@ Use your mouse with modifier keys on a mod entry:
 ## Markers
 
 Markers are small data assets that tell the tooling what to cook and pack, and tell the
-in-game Unchained loader how to discover your mod and its maps. There are two kinds — **mod
-markers** and **map markers** — and both offer **tool-menu buttons** (in the asset editor) and
+in-game Unchained loader how to discover your mod and its maps. There are two kinds, **mod
+markers** and **map markers**, and both offer **tool-menu buttons** (in the asset editor) and
 **right-click context-menu** actions in the Content Browser.
 
 > [!NOTE]
@@ -139,11 +139,11 @@ the in-game mod loader.
 | Feature | What it gives you |
 |---|---|
 | **Bundled mods** | Adding a marker to **`Bundled Markers`** produces a single pak containing multiple mods. A checkbox lets you instead produce a separate pak for each bundled mod (off by default). |
-| **Mod versioning** | The version is read from **`mod.json`** and propagated to referenced markers (**`Refresh`** syncs the `mod.json` and marker version fields). You can generate a `mod.json` from the editor and bump the **Major / Minor / Patch** version (the tool menu bumps patch; the context menu offers all three). Before cooking, the `mod.json` version is propagated to the marker and its listed `Mod Actor Classes` — and, for bundled markers, to the nested markers and actors too. |
+| **Mod versioning** | The version is read from **`mod.json`** and propagated to referenced markers (**`Refresh`** syncs the `mod.json` and marker version fields). You can generate a `mod.json` from the editor and bump the **Major / Minor / Patch** version (the tool menu bumps patch; the context menu offers all three). Before cooking, the `mod.json` version is propagated to the marker and its listed `Mod Actor Classes`, and for bundled markers to the nested markers and actors too. |
 | **Excluded paths** | Use the **`Excluded Paths`** array to keep directories and assets out of the cook and pak (supports wildcards). |
 
 > [!NOTE]
-> **`Icon`** and **`List Tags`** already exist on the marker — set them now. The in-game mod
+> **`Icon`** and **`List Tags`** already exist on the marker, so set them now. The in-game mod
 > loader does not yet **display** the icon or **filter** by tags; that UI is still to come. The
 > values ship and are read by the loader in the meantime.
 
@@ -167,8 +167,8 @@ The map marker (`DA_MapMarker_V2`) specifies which maps get cooked and packaged 
 | Feature | What it does |
 |---|---|
 | **Custom loading screens** | **`DefaultLoadingScreen`** sets the texture for every referenced map; it can be overridden per map. (Works with the newest UnchainedPlugin.) |
-| **Automatic sublevel pickup** | Add only the base level (e.g. `TDM_QuarryKP`) to **`Maps`** — the cook script picks up the sublevels it loads. Click **`Update layers`** to populate a reference array you can inspect; that array is for your eyes only and is not used during cooking. |
-| **Map state (`Shipped` / `Held`)** | Withhold maps from the cook/pak — e.g. unfinished variants or test maps. |
+| **Automatic sublevel pickup** | Add only the base level (e.g. `TDM_QuarryKP`) to **`Maps`**; the cook script picks up the sublevels it loads. Click **`Update layers`** to populate a reference array you can inspect; that array is for your eyes only and is not used during cooking. |
+| **Map state (`Shipped` / `Held`)** | Withhold maps from the cook/pak, e.g. unfinished variants or test maps. |
 | **Exclusions** | Skip folders or filename patterns from consideration. |
 
 ![A map marker open in its asset editor with the toolbar actions](docs-assets/usage-sdk/map-marker-with-toolbar.png)
@@ -182,7 +182,7 @@ A single map (with or without sublevels):
 
 A mod with multiple maps:
 
-1. Add entries to the **`Maps`** array — drag-and-drop a map onto the field, or use the asset picker.
+1. Add entries to the **`Maps`** array: drag-and-drop a map onto the field, or use the asset picker.
 2. Click **`Refresh`** to populate each map's **`MapName`**, **`MapDescription`** and faction fields.
 3. (Optional) click **`ignore unused`** and check whether you missed any maps.
 4. (Optional) click **`Update layers`** and check they're all present. If a sublevel loads only on

@@ -5,11 +5,11 @@ This is a UE **plugin** (`ArgonSDKTooling`) so a single copy of the **code**
 serves **both** SDK projects (the editor widgets live here too, in
 `Content/Scripts/ModHandling/`):
 
-- `ArgonSDK` — UE 4.25 (Launcher engine, `EngineAssociation: "4.25"`)
-- `Unchained` — UE 4.25+ (Plus source engine, `EngineAssociation: "{...GUID}"`)
+- `ArgonSDK`: UE 4.25 (Launcher engine, `EngineAssociation: "4.25"`)
+- `Unchained`: UE 4.25+ (Plus source engine, `EngineAssociation: "{...GUID}"`)
 
 > [!TIP]
-> **New to packaging mods? Start with the [Mod Packer Usage Guide](./USAGE.md)** — a
+> **New to packaging mods? Start with the [Mod Packer Usage Guide](./USAGE.md).** It is a
 > step-by-step walkthrough of the in-editor widget: creating mods, cooking, paking, and the
 > mod/map markers. This README is the reference for the CLI, project setup, and the internals.
 
@@ -31,11 +31,11 @@ python deploy.py sync-tooling
 
 ## Project setup (ini config, one-time per SDK)
 
-Enabling the plugin is not enough — two project config files need entries before
+Enabling the plugin is not enough: two project config files need entries before
 the marker workflow and the cook behave correctly. Paths below assume the stock
 `Content/Mods/ArgonSDK/Mods/ModLoading` layout.
 
-### 1. Load the marker scripts — `Config/DefaultEngine.ini`
+### 1. Load the marker scripts: `Config/DefaultEngine.ini`
 
 The map/mod marker right-click and toolbar actions come from the SDK's
 `ModLoading/Python` scripts; they only register if the editor runs them at
@@ -52,15 +52,15 @@ bDeveloperMode=True
   silently ignores your changes.
 - The **`+StartupScripts` line is what actually registers the menus**: it appends
   the scripts folder to `sys.path` via `project_content_dir()` and calls
-  `mapmarker_menu.register()`. `+AdditionalPaths` on its own is **not** enough —
+  `mapmarker_menu.register()`. `+AdditionalPaths` on its own is **not** enough:
   those are resolved relative to `Binaries/Win64` and do not reach the content
   folder here, so the explicit `sys.path` append is required.
 - Restart the editor after changing this.
 
 > The `Unchained` SDK already has these lines; the clean `ArgonSDK` checkout does
-> not yet — add them there when you wire the marker scripts in.
+> not yet, so add them there when you wire the marker scripts in.
 
-### 2. Keep Blueprint structs/enums shippable — `Config/DefaultGame.ini`
+### 2. Keep Blueprint structs/enums shippable: `Config/DefaultGame.ini`
 
 The V2 map marker stores its rows in a Blueprint struct (`F_ShippedMap`) and enum
 (`E_MapShipState`). The base project packages with **exclusive** Blueprint
@@ -74,7 +74,7 @@ BlueprintNativizationMethod=Exclusive
 Under nativization, a converted type becomes generated C++ with **no shipped
 `.uasset`**. In UE 4.25 that can pull a mod's user-defined structs/enums into
 nativization and drop their assets from the pak, even though the mod's Blueprints
-still import them — so the mod fails to load. Leave this value as the base game
+still import them, so the mod fails to load. Leave this value as the base game
 sets it (`Exclusive`); the cooker then **auto-detects the user structs/enums a mod
 uses and excludes them from nativization** for that cook, so they ship as assets
 (recorded in the manifest's `nativization_exclusions`). No per-mod config is
@@ -85,7 +85,7 @@ unavailable, so pass them explicitly or the cook fails closed:
 python deploy.py cook <mod> --exclude-asset /Game/.../F_ShippedMap --exclude-asset /Game/.../E_MapShipState
 ```
 
-### Optional — docked widget
+### Optional: docked widget
 
 A docked Mod Packer widget and Content Browser favorites can be shipped via
 `Config/DefaultEditorPerProjectUserSettings.ini` (`LoadedUIs` / `FavoritePaths`).
@@ -94,7 +94,7 @@ This is convenience only; the tooling works without it.
 ## Editor usage (in the widget)
 
 The plugin's primary consumers are the SDK's in-editor widgets, which use the
-**package** API via `import deploy` (note: `deploy.py` is only a CLI shim —
+**package** API via `import deploy` (note: `deploy.py` is only a CLI shim;
 `import deploy` resolves to `deploy/__init__.py`):
 
 ```python
@@ -233,7 +233,7 @@ The old setup split this tooling across every SDK's `Content/Python` and
 `Content/Scripts/ModHandling`, which:
 - duplicated the cook script per SDK (single `cook_mod.py`, drifting copies),
 - worked only for one machine's hardcoded paths,
-- made the widgets (binary `.uasset`, **unmergeable**) a `git pull` target —
+- made the widgets (binary `.uasset`, **unmergeable**) a `git pull` target, so
   anyone with local widget edits could not cleanly update.
 
 That last point is the core design rule here:
