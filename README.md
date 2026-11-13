@@ -8,6 +8,11 @@ serves **both** SDK projects (the editor widgets live here too, in
 - `ArgonSDK` — UE 4.25 (Launcher engine, `EngineAssociation: "4.25"`)
 - `Unchained` — UE 4.25+ (Plus source engine, `EngineAssociation: "{...GUID}"`)
 
+> [!TIP]
+> **New to packaging mods? Start with the [Mod Packer Usage Guide](./USAGE.md)** — a
+> step-by-step walkthrough of the in-editor widget: creating mods, cooking, paking, and the
+> mod/map markers. This README is the reference for the CLI, project setup, and the internals.
+
 ## Using in a SDK
 
 Drop (or submodule) `ArgonSDKTooling/` into `<SDK>/Plugins/`, enable
