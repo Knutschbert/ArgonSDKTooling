@@ -206,6 +206,20 @@ class ParseSizeTests(unittest.TestCase):
                 pak.parse_size(bad)
 
 
+class ResolveMaxPakSizeTests(unittest.TestCase):
+    def test_unset_uses_500mb_default(self):
+        self.assertEqual(pak.DEFAULT_MAX_PAK_SIZE, '500MB')
+        self.assertEqual(pak.resolve_max_pak_size(None), 500 * 1024 * 1024)
+
+    def test_explicit_size_overrides_default(self):
+        self.assertEqual(pak.resolve_max_pak_size('200MB'), 200 * 1024 * 1024)
+        self.assertEqual(pak.resolve_max_pak_size(1000), 1000)
+
+    def test_disable_tokens_mean_no_split(self):
+        for off in (0, '0', 'none', 'NONE', 'off', '', '  ', False):
+            self.assertIsNone(pak.resolve_max_pak_size(off))
+
+
 class PartitionTests(unittest.TestCase):
     @staticmethod
     def _e(target, size):

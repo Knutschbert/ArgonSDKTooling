@@ -571,7 +571,7 @@ def _main(argv=None):
     p.add_argument('--out', help='output dir (default <Saved>/CookedMod/<mod>)')
     p.add_argument('--dest', help='pak destination dir (cook then pak)')
     p.add_argument('--max-chunk', type=int, default=_cook.MAX_PACKAGES_PER_RUN)
-    p.add_argument('--max-pak-size', help='split the pak if it exceeds this size, e.g. 200MB')
+    p.add_argument('--max-pak-size', help='cap before splitting into _partN (default 500MB; 0/none disables), e.g. 200MB')
     p.add_argument('--exclude-asset', action='append', default=[],
                    help='explicit UserDefinedStruct/UserDefinedEnum package to exclude from nativization (CLI fallback)')
     p.add_argument('--dry-run', action='store_true', help='print commands without running')
@@ -580,7 +580,7 @@ def _main(argv=None):
     p = sub.add_parser('pak', help='pak already-cooked output (provenance-validated)')
     p.add_argument('mods', nargs='+')
     p.add_argument('--dest', required=True)
-    p.add_argument('--max-pak-size', help='split the pak if it exceeds this size, e.g. 200MB')
+    p.add_argument('--max-pak-size', help='cap before splitting into _partN (default 500MB; 0/none disables), e.g. 200MB')
     p.add_argument('--uproject'); p.add_argument('--engine')
 
     p = sub.add_parser('sync-tooling', help='update the plugin/widget pack, preserving _Local')

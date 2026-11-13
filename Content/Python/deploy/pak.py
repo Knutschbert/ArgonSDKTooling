@@ -9,12 +9,14 @@ Port of cook_mod.py's pak path, behavior-preserving:
   listing(s) are published ATOMICALLY (os.replace / MoveFileExW). A failed
   create or list can never masquerade as a good old/partial pak.
 
-Optional PER-SIZE SPLITTING (vje.13): when max_pak_size is set and the cooked
-output exceeds it, the response file is partitioned by destination PACKAGE (base
-path - a package's .uasset/.uexp/.ubulk stay together) into N parts, published
+PER-SIZE SPLITTING (vje.13): paks are capped at DEFAULT_MAX_PAK_SIZE (500MB) by
+default so each part stays within GitHub release file-size limits. When the cooked
+output exceeds the cap, the response file is partitioned by destination PACKAGE
+(base path - a package's .uasset/.uexp/.ubulk stay together) into N parts, published
 as <mod>_part1.pak, <mod>_part2.pak, ... A single package larger than the
 threshold keeps its own (oversized) part - we never split a package. If the
-output is within the threshold, an ordinary single <mod>.pak is produced.
+output is within the threshold, an ordinary single <mod>.pak is produced. Pass
+max_pak_size=0 / 'none' to disable splitting.
 """
 from __future__ import print_function
 
@@ -105,6 +107,26 @@ def parse_size(text):
     if value < 0 or not number:
         raise ValueError('cannot parse size: {0!r}'.format(text))
     return int(value * _MULTIPLIERS.get(suffix, 1))
+
+
+# Default pak size cap. Paks larger than this are split into <stem>_partN so each
+# part stays within GitHub release file-size limits (which USAGE.md documents).
+DEFAULT_MAX_PAK_SIZE = '500MB'
+_NO_SPLIT_TOKENS = ('0', 'none', 'off', 'unlimited', 'false')
+
+
+def resolve_max_pak_size(max_pak_size):
+    """Bytes threshold for splitting, or None meaning 'do not split'.
+
+    None / unset -> the DEFAULT_MAX_PAK_SIZE (500MB) cap. An explicit 0 / 'none' /
+    'off' / '' disables splitting. Anything else is parsed by parse_size.
+    """
+    if max_pak_size is None:
+        max_pak_size = DEFAULT_MAX_PAK_SIZE
+    token = str(max_pak_size).strip().lower()
+    if not token or token in _NO_SPLIT_TOKENS:
+        return None
+    return parse_size(max_pak_size)
 
 
 # -- filelist ------------------------------------------------------------------
@@ -241,10 +263,11 @@ def build_pak_groups(cooked_dir, mod_dir, pak_plan, registry_source=None):
 def plan_parts(result, mod_dir, max_pak_size=None, registry_source=None):
     """([entry lists], [pak stems], all entries): what PakJob / pak_mod publish.
 
-    Without a marker plan (result['pak_plan']) this is the single legacy pak '<mod>' (split by size when asked);
-    with one, every planned pak, each split by size on its own as '<stem>_partN'.
+    Without a marker plan (result['pak_plan']) this is the single legacy pak '<mod>' (split at the size cap);
+    with one, every planned pak, each split on its own as '<stem>_partN'. The cap defaults to
+    DEFAULT_MAX_PAK_SIZE (500MB); max_pak_size overrides it, and 0 / 'none' disables splitting.
     """
-    threshold = parse_size(max_pak_size) if max_pak_size else None
+    threshold = resolve_max_pak_size(max_pak_size)
     if result.get('pak_plan'):
         groups = build_pak_groups(result['cooked_dir'], mod_dir, result['pak_plan'], registry_source)
     else:
