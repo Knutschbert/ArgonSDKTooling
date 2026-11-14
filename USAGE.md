@@ -139,8 +139,16 @@ the in-game mod loader.
 | Feature | What it gives you |
 |---|---|
 | **Bundled mods** | Adding a marker to **`Bundled Markers`** produces a single pak containing multiple mods. A checkbox lets you instead produce a separate pak for each bundled mod (off by default). |
-| **Mod versioning** | The version is read from **`mod.json`** and propagated to referenced markers (**`Refresh`** syncs the `mod.json` and marker version fields). You can generate a `mod.json` from the editor and bump the **Major / Minor / Patch** version (the tool menu bumps patch; the context menu offers all three). Before cooking, the `mod.json` version is propagated to the marker and its listed `Mod Actor Classes`, and for bundled markers to the nested markers and actors too. |
-| **Excluded paths** | Use the **`Excluded Paths`** array to keep directories and assets out of the cook and pak (supports wildcards). |
+| **Mod versioning** | The version is read from **`mod.json`** and propagated to referenced markers. You can generate a `mod.json` from the editor and bump the **Major / Minor / Patch** version (the tool menu bumps patch; the context menu offers all three). Before cooking, the `mod.json` version is propagated to the marker and its listed `Mod Actor Classes`, and for bundled markers to the nested markers and actors too. |
+| **Excluded paths** | Use the **`Excluded Paths`** array to keep directories and assets out of the cook and pak. Paths are relative to the marker's folder, without the `.uasset`/object suffix. Prefixes and wildcards are supported: `Actors/`, `*_Debug`, `Actors/*`, and `Actor?`. Matching is case-insensitive and wildcards can match parent folders. Refresh also applies these rules before populating `Mod Actor Classes`. |
+| **V2 actor selection** | For a folder governed by a V2 marker, `Mod Actor Classes` is authoritative: an unlisted `ArgonSDKModBase` actor package is excluded from the cook and filtered again during pak assembly. This also removes stale cooked copies. V1-only folders retain the legacy behavior of shipping all folder assets. |
+
+> [!IMPORTANT]
+> The cook never rewrites `mod.json`. It reports effective-version overrides and missing metadata.
+> A nested marker without its own `mod.json` inherits its parent version, while stale marker-only
+> versions are cleared. If **`ApplyVersionToBundled`** is enabled on a bundled root, a nested marker's
+> effective marker/actor version can intentionally differ from that nested marker's own JSON; the
+> override is logged rather than written back to JSON.
 
 > [!NOTE]
 > **`Icon`** and **`List Tags`** already exist on the marker, so set them now. The in-game mod
@@ -152,6 +160,34 @@ the in-game mod loader.
 Right-clicking a mod marker offers the same actions as the tool menu:
 
 ![Mod marker right-click context menu](docs-assets/usage-sdk/mod-marker-context-menu.png)
+
+> [!TIP]
+> If the toolbar was opened before changing the Content Browser selection, **Refresh** resolves the
+> currently selected marker when clicked and falls back to the marker that opened the toolbar. The
+> action reports which actor classes it added, removed as nested-owned, or removed because they match
+> **`Excluded Paths`**.
+
+#### Exclusion example
+
+For an asset at:
+
+```text
+/Game/Mods/ArgonSDK/Mods/ModMenu/AgSDKModMenu_2
+```
+
+use this in the marker directly inside `Mods/ModMenu`:
+
+```text
+AgSDKModMenu_2
+```
+
+For a marker in `/Game/Mods/ArgonSDK`, use:
+
+```text
+Mods/ModMenu/AgSDKModMenu_2
+```
+
+Do not use the object path form `AgSDKModMenu_2.AgSDKModMenu_2` in **`Excluded Paths`**.
 
 #### Converting V1 mod markers to V2
 
