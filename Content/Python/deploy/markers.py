@@ -90,9 +90,20 @@ def preflight(mod_dir):
             if stamped['markers'] or stamped['actors']:
                 print('[deploy] versions stamped: {0} marker(s), {1} mod actor class(es)'.format(
                     len(stamped['markers']), len(stamped['actors'])))
+            if stamped.get('missing_versions'):
+                print('[deploy] marker version metadata missing (nested markers may inherit): {0}'.format(
+                    ', '.join(stamped['missing_versions'])))
         else:
             modmarker.stamp_versions(mod_dir)
-        return modmarker.plan(mod_dir)
+        plan = modmarker.plan(mod_dir)
+        mismatches = []
+        for marker, source_version in (plan.get('json_versions') or {}).items():
+            effective = (plan.get('versions') or {}).get(marker) or ''
+            if source_version and source_version != effective:
+                mismatches.append('{0}: mod.json={1}, effective={2}'.format(marker, source_version, effective or '<none>'))
+        if mismatches:
+            print('[deploy] marker version overrides do not rewrite mod.json: {0}'.format('; '.join(mismatches)))
+        return plan
     except Exception as error:  # noqa: BLE001
         raise RuntimeError('could not read the mod markers below {0}: {1}'.format(mod_dir, error))
 
@@ -100,6 +111,17 @@ def preflight(mod_dir):
 def folder_excludes(pak_plan):
     """{marker folder: [ExcludedPaths patterns]} for every marker in a plan."""
     return dict((pak_plan['dirs'][m], list(p)) for m, p in (pak_plan.get('excluded') or {}).items() if p and m in pak_plan['dirs'])
+
+
+def actor_excludes(pak_plan):
+    """Exact package paths for unlisted V2 mod actor Blueprints."""
+    return set(pak_plan.get('actor_excluded') or [])
+
+
+def apply_actor_excludes(packages, excluded):
+    excluded = set(excluded or ())
+    kept = [package for package in packages if package not in excluded]
+    return kept, [package for package in packages if package in excluded]
 
 
 def bundled_folders(pak_plan, mod_dir):
@@ -113,4 +135,5 @@ def manifest_plan(pak_plan):
     return {'paks': [{'stem': p['stem'], 'root': p['root'], 'separate': bool(p['separate']), 'markers': list(p['markers'])}
                      for p in pak_plan['paks']],
             'dirs': dict(pak_plan['dirs']), 'excluded': dict((k, list(v)) for k, v in (pak_plan.get('excluded') or {}).items()),
+            'actor_excluded': sorted(set(pak_plan.get('actor_excluded') or [])),
             'warnings': list(pak_plan.get('warnings') or [])}

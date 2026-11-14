@@ -255,6 +255,8 @@ def plan_packages(uproject, mod_dir, plan=None, pak_plan=None):
     excludes = markers.folder_excludes(pak_plan)
     result['packages'], dropped = markers.apply_excludes(result['packages'], excludes)
     result['skipped'] = sorted(set(result['skipped']) | set(dropped))
+    result['packages'], dropped = markers.apply_actor_excludes(result['packages'], markers.actor_excludes(pak_plan))
+    result['skipped'] = sorted(set(result['skipped']) | set(dropped))
     for folder in markers.bundled_folders(pak_plan, mod_dir):
         try:
             entries = scan_packages(uproject, folder)
@@ -264,8 +266,9 @@ def plan_packages(uproject, mod_dir, plan=None, pak_plan=None):
         folder_maps = maps.marker_plan(folder)
         kept, skipped = select_packages(entries, set(folder_maps['maps']) if folder_maps is not None else None)
         kept, dropped = markers.apply_excludes(kept, excludes)
+        kept, actor_dropped = markers.apply_actor_excludes(kept, markers.actor_excludes(pak_plan))
         result['packages'] = sorted(set(result['packages']) | set(kept))
-        result['skipped'] = sorted(set(result['skipped']) | set(skipped) | set(dropped))
+        result['skipped'] = sorted(set(result['skipped']) | set(skipped) | set(dropped) | set(actor_dropped))
         result['bundled'].append(folder)
     return result
 

@@ -181,7 +181,8 @@ def _cooked_folder(content_root, folder):
     return os.path.join(content_root, folder[len('/Game/'):].replace('/', os.sep))
 
 
-def entries_for_tree(content_root, tree_folder, content_parents, skip_folders, excludes, skip_registry_at=None):
+def entries_for_tree(content_root, tree_folder, content_parents, skip_folders, excludes,
+                     skip_registry_at=None, actor_excluded=None):
     """[(source, target, size, from_content)] for every cooked file below one folder of the marker plan.
 
     Real-path files mount at ../../../TBL/Content/<path from the content root>. Files below ANY `_Content` folder
@@ -203,6 +204,8 @@ def entries_for_tree(content_root, tree_folder, content_parents, skip_folders, e
                 continue
             rel_dir = os.path.relpath(root, content_root).replace(os.sep, '/')
             package = '/Game/' + rel_dir + '/' + os.path.splitext(name)[0]
+            if package in (actor_excluded or ()):
+                continue
             if markers.apply_excludes([package], excludes)[1]:
                 continue
             from_content = False
@@ -242,6 +245,7 @@ def build_pak_groups(cooked_dir, mod_dir, pak_plan, registry_source=None):
     content_root = _content_root(cooked_dir, mod_dir)
     dirs = pak_plan['dirs']
     excludes = markers.folder_excludes(pak_plan)
+    actor_excluded = markers.actor_excludes(pak_plan)
     own_roots = [p['root'] for p in pak_plan['paks'] if p['separate']]
     groups = []
     for index, pak in enumerate(pak_plan['paks']):
@@ -252,7 +256,7 @@ def build_pak_groups(cooked_dir, mod_dir, pak_plan, registry_source=None):
         entries = []
         for tree in trees:
             entries += entries_for_tree(content_root, tree, member_folders + [mod_dir.rstrip('/')], skip, excludes,
-                                        skip_registry_at=mod_dir.rstrip('/'))
+                                        skip_registry_at=mod_dir.rstrip('/'), actor_excluded=actor_excluded)
         if index == 0 and registry_source and os.path.isfile(registry_source):
             target = '../../../{0}/Content/{1}/ModAssetRegistry.bin'.format(PROJECT_NAME, mod_dir[len('/Game/'):].strip('/'))
             entries.append((registry_source, target, os.path.getsize(registry_source), False))
